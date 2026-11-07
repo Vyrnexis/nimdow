@@ -1,0 +1,55 @@
+# Maintainer: Vyrnexis
+#
+# Wayland (River 0.5+) branch of nimdow, built from git.
+#   cd packaging/arch && makepkg -si
+#
+# The only Nim dependency (parsetoml) is a pinned source tarball, so nothing
+# but the sources below is downloaded at build time (no nimble, no network in
+# build()).
+pkgname=nimdow-wayland-git
+pkgver=0.7.41.r509.g6ab3261
+pkgrel=1
+pkgdesc='Nim window manager for the River Wayland compositor, with its own status bar and system tray'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Vyrnexis/nimdow'
+license=('GPL-2.0-only')
+depends=('river>=0.5' 'wayland' 'libxkbcommon' 'cairo' 'pango' 'librsvg'
+         'systemd-libs' 'glib2' 'harfbuzz' 'gdk-pixbuf2')
+makedepends=('git' 'nim' 'pkgconf')
+provides=('nimdow')
+conflicts=('nimdow' 'nimdow-bin' 'nimdow-git')
+source=('nimdow::git+https://github.com/Vyrnexis/nimdow.git#branch=wayland'
+        'parsetoml-0.7.2.tar.gz::https://github.com/NimParsers/parsetoml/archive/refs/tags/v0.7.2.tar.gz')
+sha256sums=('SKIP'
+            '568acfd8193ca9e2bdb5f40ed71c2ccf35d4f50778bb25c8d26ed1e8896f89c8')
+
+pkgver() {
+  cd nimdow
+  local version
+  version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' nimdow.nimble)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd nimdow
+  # Shown by `nimdow --version`.
+  export LATEST_COMMIT
+  LATEST_COMMIT=$(git rev-parse --short HEAD)
+  mkdir -p bin
+  nim c -d:release --deepcopy:on --hints:off \
+    --nimcache:"$srcdir/nimcache" \
+    --path:"$srcdir/parsetoml-0.7.2/src" \
+    --passC:"$CFLAGS" --passL:"$LDFLAGS" \
+    -o:bin/nimdow src/nimdow.nim
+}
+
+package() {
+  cd nimdow
+  install -Dm755 bin/nimdow "$pkgdir/usr/bin/nimdow"
+  install -Dm644 config.default.toml "$pkgdir/usr/share/nimdow/config.default.toml"
+  install -Dm644 wayland-sessions/nimdow.desktop \
+    "$pkgdir/usr/share/wayland-sessions/nimdow.desktop"
+  install -Dm644 doc/nimdow.1 "$pkgdir/usr/share/man/man1/nimdow.1"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
