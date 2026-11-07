@@ -8,10 +8,15 @@
 #   -b  build bin/nimdow and bin/nimdowinput first
 #   -s  only run the named scenarios (comma separated, see `scenario_*` below)
 #
-# Requires: river >= 0.5, grim, alacritty, jq, a running Wayland session to nest in.
+# Requires: river >= 0.5, grim, alacritty, jq, dbus-run-session, python3 with
+# gi (for tests/e2e/fake_sni.py), a running Wayland session to nest in.
 # nimdow is driven with tests/e2e/config.toml; input is injected with
 # bin/nimdowinput (virtual keyboard/pointer). State is asserted through
 # `nimdow --dumpState`, with screenshots (grim) as extra evidence.
+#
+# The nested river runs inside `dbus-run-session`: the tray tests use a private
+# session bus and never touch the real one (the inner part aborts if the bus
+# address is the outer one).
 #
 # The script runs twice: the outer part starts river, whose -c command is this
 # script again with --inner (it then runs inside the nested session).
@@ -49,7 +54,7 @@ RESULTS="$OUT/results.txt"
 # ---------------------------------------------------------------------------
 if [ "$MODE" = outer ]; then
   export PATH="$HOME/.nimble/bin:$PATH"
-  for tool in river grim alacritty jq; do
+  for tool in river grim alacritty jq dbus-run-session python3; do
     command -v "$tool" >/dev/null || { echo "missing tool: $tool"; exit 2; }
   done
   if [ "$BUILD" = 1 ] || [ ! -x "$ROOT/bin/nimdow" ] || [ ! -x "$ROOT/bin/nimdowinput" ]; then
@@ -63,7 +68,7 @@ if [ "$MODE" = outer ]; then
   # Unix socket paths are short: nimdow's IPC socket lives in a private runtime dir.
   RT="$(mktemp -d /tmp/nde2e.XXXXXX)"
   chmod 700 "$RT"
-  export E2E_RT="$RT" E2E_OUT="$OUT" E2E_ONLY="$ONLY"
+  export E2E_RT="$RT" E2E_OUT="$OUT" E2E_ONLY="$ONLY" E2E_OUTER_BUS="${DBUS_SESSION_BUS_ADDRESS:-none}"
 
   # run_phase <name> <number of nested outputs> <scenario names...>
   # Phases: "multi" (two outputs) and "single" (one output, ends with exitSession).
@@ -79,7 +84,7 @@ if [ "$MODE" = outer ]; then
     [ "$want" = 1 ] || return 0
     export E2E_PHASE="$phase"
     local start=$SECONDS
-    WLR_WL_OUTPUTS="$outputs" timeout -k 5 "$TIMEOUT" river -no-xwayland \
+    WLR_WL_OUTPUTS="$outputs" timeout -k 5 "$TIMEOUT" dbus-run-session -- river -no-xwayland \
       -log-level "${E2E_RIVER_LOG:-warning}" \
       -c "bash '$SELF' --inner > '$OUT/inner-$phase.log' 2>&1" > "$OUT/river-$phase.log" 2>&1
     local river_status=$?
@@ -125,9 +130,10 @@ if [ "$MODE" = outer ]; then
   }
 
   run_phase multi 2 multiMonitor
+  run_phase trayhost 1 trayHostOnly
   run_phase single 1 spawn viewTags moveToTag focus masterCount masterWidth floating \
     fullscreen close tagOps order reload typing dragMove dragResize barClick barScroll \
-    clickFocus appRules scratchpad statusBar exitSession
+    clickFocus appRules scratchpad statusBar trayIcons trayClick trayUpdate trayVanish exitSession
   rm -rf "$RT"
 
   echo
@@ -144,6 +150,11 @@ fi
 # Inner: runs inside the nested river
 # ---------------------------------------------------------------------------
 cd "$ROOT" || exit 1
+# Never run against the user's real session bus.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] || [ "$DBUS_SESSION_BUS_ADDRESS" = "${E2E_OUTER_BUS:-none}" ]; then
+  echo "FAIL dbus-$E2E_PHASE: not inside a private session bus, refusing to run" >> "$E2E_OUT/results.txt"
+  exit 1
+fi
 ONLY="${E2E_ONLY:-}"
 # River sets a relative WAYLAND_DISPLAY; nimdow gets a private runtime dir for its IPC socket.
 export WAYLAND_DISPLAY="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
@@ -595,6 +606,129 @@ scenario_exitSession() {
   sleep 5
 }
 
+# --- System tray (StatusNotifierItem) -------------------------------------
+# Fixtures: tests/e2e/fake_sni.py on the private session bus.
+FAKE="$ROOT/tests/e2e/fake_sni.py"
+SNI_LOG="$OUT/sni-${E2E_PHASE:-single}.log"
+TRAY_PIDS=()
+tray_kill() {
+  local p
+  for p in "${TRAY_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+  TRAY_PIDS=()
+}
+# tray_item <variant> <id>: starts a fake item; its pid is in LAST_PID.
+tray_item() {
+  python3 "$FAKE" item --variant "$1" --id "$2" --log "$SNI_LOG" >> "$OUT/fake-$2.out" 2>&1 &
+  LAST_PID=$!
+  TRAY_PIDS+=("$LAST_PID")
+}
+# tray_up: fresh fixtures (a named icon, then a pixmap icon), both shown.
+tray_up() {
+  tray_kill
+  : > "$SNI_LOG"
+  tray_item name fake-name; NAME_PID=$LAST_PID
+  expect "first tray icon" '(M.tray | length) == 1'
+  tray_item pixmap fake-pixmap; PIX_PID=$LAST_PID
+  expect "both tray icons" '(M.tray | length) == 2'
+}
+tray_x() { q "[M.tray[] | select(.id == \"$1\")][0] | .x + (.width / 2 | floor)"; }
+wait_log() {  # wait_log <pattern> <description>
+  local i
+  for i in $(seq 1 30); do
+    grep -q -- "$1" "$SNI_LOG" 2>/dev/null && return 0
+    sleep 0.15
+  done
+  FAILED=1
+  DETAIL="$DETAIL [$2: no '$1' in sni.log]"
+  return 1
+}
+
+scenario_trayIcons() {
+  begin trayIcons
+  tray_up
+  expect "icons are real, active, inside the bar and do not overlap" \
+    "M.barHeight as \$bh | all(M.tray[]; .hasIcon and .status == \"isActive\" and .width == (\$bh - 4) and .x >= 0) and (M.tray[1].x >= M.tray[0].x + M.tray[0].width + 4)"
+  expect "named icon found through the theme chain, pixmap converted" \
+    '(M.tray[0].icon | test("dialog-information")) and (M.tray[1].icon | startswith("pixmap:32x32"))'
+  nimdow_status="tray status text"
+  "$NIMDOW" --status "$nimdow_status" >/dev/null 2>&1
+  sleep 0.5
+  shot trayIcons
+  "$NIMDOW" --status "" >/dev/null 2>&1
+  tray_kill
+}
+
+scenario_trayClick() {
+  begin trayClick
+  tray_up
+  local nx px y=$((BAR / 2))
+  nx="$(tray_x fake-name)"; px="$(tray_x fake-pixmap)"
+  "$INPUT" move "$nx" "$y"; "$INPUT" click left
+  wait_log "fake-name Activate " "left click activates"
+  "$INPUT" click middle
+  wait_log "fake-name SecondaryActivate " "middle click"
+  "$INPUT" click right
+  wait_log "fake-name ContextMenu " "right click"
+  "$INPUT" scroll down
+  wait_log "fake-name Scroll 1 vertical" "scroll down"
+  "$INPUT" scroll up
+  wait_log "fake-name Scroll -1 vertical" "scroll up"
+  "$INPUT" move "$px" "$y"; "$INPUT" click left
+  wait_log "fake-pixmap Activate " "click on the second icon"
+  # A click on a tray icon does not click a bar tag.
+  expect "tags untouched" 'M.selectedTags == [1]'
+  tray_kill
+}
+
+scenario_trayUpdate() {
+  begin trayUpdate
+  tray_up
+  expect "initial icons" '(M.tray[0].icon | test("dialog-information")) and (M.tray[1].icon | test("pixmap:32x32:FF0000"))'
+  kill -USR1 "$NAME_PID" "$PIX_PID"
+  expect "NewIcon: named icon changed to the svg, pixmap to green|yellow" \
+    '(M.tray[0].icon | test("audio-headphones.svg")) and (M.tray[1].icon | test("pixmap:32x32:00C800")) and all(M.tray[]; .hasIcon)'
+  shot trayUpdate
+  kill -USR2 "$PIX_PID"
+  expect "Passive hides the item" '(M.tray | length) == 1 and M.tray[0].id == "fake-name"'
+  kill -USR2 "$PIX_PID"
+  expect "Active shows it again" '(M.tray | length) == 2'
+  tray_kill
+}
+
+scenario_trayVanish() {
+  begin trayVanish
+  tray_up
+  kill -9 "$NAME_PID"
+  expect "icon removed when its owner disappears" '(M.tray | length) == 1 and M.tray[0].id == "fake-pixmap"'
+  tray_kill
+  expect "all icons gone" '(M.tray | length) == 0'
+}
+
+# nimdow starts with another watcher already on the bus (phase trayhost).
+scenario_trayHostOnly() {
+  begin trayHostOnly
+  expect "item registered before nimdow started is shown (watcher's list)" \
+    '(M.tray | length) >= 1 and M.tray[0].id == "fake-name" and M.tray[0].hasIcon'
+  grep -q "another StatusNotifierWatcher exists" "$OUT/nimdow-$PHASE.log" || {
+    FAILED=1; DETAIL="$DETAIL [nimdow did not report host-only mode]"; }
+  wait_log "watcher RegisterStatusNotifierHost org.kde.StatusNotifierHost-" "nimdow registered its host"
+  tray_item pixmap fake-pixmap; PIX_PID=$LAST_PID
+  expect "item registered later (watcher signal) is shown" '(M.tray | length) == 2 and all(M.tray[]; .hasIcon)'
+  [ "$(grep -c 'watcher RegisterStatusNotifierItem' "$SNI_LOG")" -ge 2 ] || {
+    FAILED=1; DETAIL="$DETAIL [items were not registered with the other watcher]"; }
+  shot trayHostOnly
+  local nx
+  nx="$(tray_x fake-name)"
+  "$INPUT" move "$nx" $((BAR / 2)); "$INPUT" click left
+  wait_log "fake-name Activate " "click in host-only mode"
+  # The other watcher goes away: nimdow takes the name over and serves new items.
+  kill "$WATCHER_PID"
+  sleep 1
+  tray_item name fake-late
+  expect "a new item registers with nimdow's own watcher" '[M.tray[] | select(.id == "fake-late")] | length == 1'
+  tray_kill
+}
+
 # Two outputs side by side (WLR_WL_OUTPUTS=2); output 1 is monitors[0].
 scenario_multiMonitor() {
   begin multiMonitor
@@ -639,6 +773,15 @@ scenario_multiMonitor() {
 # ---------------------------------------------------------------------------
 
 PHASE="${E2E_PHASE:-single}"
+if [ "$PHASE" = trayhost ]; then
+  # Another StatusNotifierWatcher, and an item registered with it, before nimdow starts.
+  : > "$SNI_LOG"
+  python3 "$FAKE" watcher --log "$SNI_LOG" > "$OUT/fake-watcher.out" 2>&1 &
+  WATCHER_PID=$!
+  for i in $(seq 1 50); do grep -q READY "$OUT/fake-watcher.out" && break; sleep 0.1; done
+  tray_item name fake-name
+  for i in $(seq 1 50); do grep -q "watcher RegisterStatusNotifierItem" "$SNI_LOG" && break; sleep 0.1; done
+fi
 "$NIMDOW" --config "$ROOT/tests/e2e/config.toml" > "$OUT/nimdow-$PHASE.log" 2>&1 &
 NIMDOW_PID=$!
 EXPECTED_MONITORS=1
@@ -661,10 +804,12 @@ shot start
 
 if [ "$PHASE" = multi ]; then
   run scenario_multiMonitor
+elif [ "$PHASE" = trayhost ]; then
+  run scenario_trayHostOnly
 else
   for s in spawn viewTags moveToTag focus masterCount masterWidth floating fullscreen close \
            tagOps order reload typing dragMove dragResize barClick barScroll clickFocus \
-           appRules scratchpad statusBar; do
+           appRules scratchpad statusBar trayIcons trayClick trayUpdate trayVanish; do
     run "scenario_$s"
   done
   reset
@@ -672,6 +817,8 @@ else
     scenario_exitSession
   fi
 fi
+tray_kill
+[ -n "${WATCHER_PID:-}" ] && kill "$WATCHER_PID" 2>/dev/null
 # Reached when exitSession did not run (or did not end the session).
 "$NIMDOW" --exitSession >/dev/null 2>&1
 sleep 2

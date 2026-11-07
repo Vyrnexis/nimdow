@@ -113,6 +113,27 @@ The status bar displays:
 - The focused window's title in the center
 - The status (set by the user) on the right
 
+### System tray <a name="tray"></a>
+
+nimdow shows tray icons on the right of the bar, using the StatusNotifierItem D-Bus protocol (what waybar, KDE
+and noctalia use; XEmbed does not exist on Wayland). It needs the D-Bus session bus and libsystemd (sd-bus);
+SVG icons need librsvg.
+
+- nimdow tries to own `org.kde.StatusNotifierWatcher`. If another program already owns it (waybar, noctalia, ...)
+  nimdow acts as a host only: it shows the items registered with that watcher, and takes over the name if the
+  other watcher goes away. It also owns `org.kde.StatusNotifierHost-<pid>`.
+- Left click calls `Activate` (or `ContextMenu` for menu-only items), middle click `SecondaryActivate`, right click
+  `ContextMenu`, scrolling `Scroll` (up: -1, down: 1). Items with status `Passive` are hidden, `NeedsAttention`
+  shows the attention icon.
+- Icons: `IconName` is looked up in the item's `IconThemePath`, the user's icon theme and its `Inherits` chain,
+  hicolor and `/usr/share/pixmaps` (SVG preferred, `a-b-c` falls back to `a-b`); otherwise the `IconPixmap` is
+  used; otherwise a placeholder letter is drawn. The theme is `trayIconTheme`, else `gtk-icon-theme-name` of the
+  GTK 3/4 `settings.ini`, else Adwaita (gsettings/dconf is not queried).
+- Settings (in `[settings]`): `trayEnabled` (default `true`, read at startup), `trayMonitor` (default `1`, the
+  first monitor; `0` follows the selected monitor), `trayIconPadding` (default `2`), `trayIconSpacing`
+  (default `4`), `trayIconTheme`.
+- Not implemented yet: the dbusmenu popup (right click only calls the item's `ContextMenu`), tooltips.
+
 ### Setting the status <a name="setting-status"></a>
 
 See the [wiki page](https://github.com/avahe-kellenberger/nimdow/wiki/Setting-the-status) about statuses.
@@ -160,11 +181,12 @@ See the [1.0 release project board](https://github.com/avahe-kellenberger/nimdow
 ## End-to-end tests (Wayland) <a name="e2e"></a>
 
 `bash tests/e2e/run.sh [-o outdir] [-b] [-s scenario,...]` runs nimdow in a nested River (needs `river`, `grim`,
-`alacritty`, `jq` and a running Wayland session) with `tests/e2e/config.toml`. Input (key bindings, typing, pointer
+`alacritty`, `jq`, `dbus-run-session`, python3 with PyGObject and a running Wayland session) with `tests/e2e/config.toml`. Input (key bindings, typing, pointer
 moves, clicks, super+drag, scrolling) is injected through the virtual keyboard/pointer protocols by
 `bin/nimdowinput` (`tests/e2e/nimdowinput.nim`, built by `-b` or on first use; `nimdowinput key super+shift+1`,
 `type "text"`, `move X Y`, `click left`, `drag super left X1 Y1 X2 Y2`, `scroll up`). Results are asserted
-through `nimdow --dumpState`; screenshots, the river/nimdow logs and `results.txt` end up in the output dir
+through `nimdow --dumpState`; the nested River runs in a private D-Bus session (`dbus-run-session`) with
+`tests/e2e/fake_sni.py` as fake tray items/watcher; screenshots, the river/nimdow logs and `results.txt` end up in the output dir
 (default `./e2e-out`).
 
 ## Testing locally (for development) <a name="testing"></a>

@@ -47,6 +47,12 @@ exec = [
   borderColorUrgent = "#ff5555"
   # Bar settings
   barHeight = 20
+  # System tray (StatusNotifierItem, see README). Icon size is barHeight - 2 * trayIconPadding.
+  trayEnabled = true
+  trayMonitor = 1 # 1 = the first monitor's bar, 2 = the second, ...; 0 = follow the selected monitor
+  trayIconPadding = 2
+  trayIconSpacing = 4
+  #trayIconTheme = "Adwaita" # default: gtk-icon-theme-name from ~/.config/gtk-{3,4}.0/settings.ini, else Adwaita
   windowTitlePosition = "center"
   barBackgroundColor = "#282a36"
   barForegroundColor = "#f8f8f2"

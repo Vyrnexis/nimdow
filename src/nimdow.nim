@@ -11,6 +11,7 @@ import
 
 import
   nimdowpkg/windowmanager,
+  nimdowpkg/tray/tray,
   nimdowpkg/config/configloader,
   nimdowpkg/ipc/cli,
   nimdowpkg/ipc/ipc,
@@ -80,6 +81,8 @@ when isMainModule:
 
   log "Starting Nimdow " & version
 
+  nimdow.startTray()
+
   try:
     loadedConfig.populateAppRules(configTable)
     loadedConfig.runAutostartCommands(configTable)
@@ -95,6 +98,9 @@ when isMainModule:
 
   selector.registerHandle(displayFd, {Event.Read}, 0)
   selector.registerHandle(ipcSocketFd, {Event.Read}, 1)
+
+  # The tray's D-Bus connection (-1 while it is not registered with the selector).
+  var trayFd = -1
 
   while true:
     # Standard libwayland read protocol: dispatch whatever is queued, flush our
@@ -112,13 +118,35 @@ when isMainModule:
       if flushed: {Event.Read} else: {Event.Read, Event.Write}
     )
 
+    # The D-Bus connection: wait for what sd-bus asks for, wake up for its
+    # timeouts and for the tray's debounced refetches.
+    var
+      busReadable = false
+      timeout = -1
+    let tray = nimdow.tray
+    if tray != nil and tray.alive:
+      let events = tray.events()
+      var wanted: set[Event] = {Event.Read}
+      if (events and POLLOUT.int) != 0: wanted.incl Event.Write
+      if trayFd < 0:
+        trayFd = tray.fd()
+        selector.registerHandle(trayFd, wanted, 2)
+      else:
+        selector.updateHandle(trayFd, wanted)
+      timeout = tray.timeoutMs()
+    elif trayFd >= 0:
+      selector.unregister(trayFd)
+      trayFd = -1
+
     var displayReadable, ipcReadable = false
-    for event in selector.select(-1):
+    for event in selector.select(timeout):
       if event.fd == displayFd:
         if Event.Read in event.events or Event.Error in event.events:
           displayReadable = true
       elif event.fd == ipcSocketFd:
         ipcReadable = true
+      elif event.fd == trayFd:
+        busReadable = true
 
     if displayReadable:
       if display.readEvents() < 0: fatal "failed to read Wayland events"
@@ -135,5 +163,11 @@ when isMainModule:
       except:
         # Client disconnected when we tried to accept.
         discard
+
+    # Always processed (not only when readable): sd-bus may have queued
+    # messages or timeouts, and due refetches run here. Never blocks.
+    if tray != nil and tray.alive:
+      tray.process()
+      discard busReadable
 
     if display.dispatchPending() < 0: fatal "failed to dispatch Wayland events"

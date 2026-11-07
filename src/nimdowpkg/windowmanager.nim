@@ -6,6 +6,7 @@ import
   taggedclients,
   monitor,
   statusbar,
+  tray/tray,
   tag,
   area,
   config/configloader,
@@ -113,6 +114,8 @@ type
     nextMonitorID: MonitorID
     ## Nil when the status bar is unavailable.
     barCtx: BarContext
+    ## The system tray; nil when disabled or without a D-Bus session bus.
+    tray*: Tray
     ## The status as set with `setStatus` (may contain per monitor statuses).
     status: string
     ## Key combos pressed since the last manage sequence.
@@ -192,6 +195,23 @@ proc applyStatus(this: WindowManager) =
       if monitor.statusBar != nil:
         monitor.statusBar.setStatus(msg)
     log msg, lvlError
+
+proc trayMonitor(this: WindowManager): Monitor =
+  ## The monitor whose bar shows the tray.
+  if this.tray == nil or not this.config.trayEnabled:
+    return nil
+  if this.config.trayMonitor <= 0:
+    return this.selectedMonitor
+  let monitors = this.sortedMonitors()
+  if monitors.len == 0:
+    return nil
+  return monitors[min(this.config.trayMonitor, monitors.len) - 1]
+
+proc startTray*(this: WindowManager) =
+  ## Starts the StatusNotifier tray (needs the bar and the D-Bus session bus).
+  if not this.config.trayEnabled or this.barCtx == nil or this.tray != nil:
+    return
+  this.tray = newTray(this.config.trayIconTheme, proc() = this.markDirty())
 
 proc setStatus*(this: WindowManager, status: string) =
   ## Sets the text shown on the right of the status bars (`nimdow --status`).
@@ -463,6 +483,13 @@ proc dumpState*(this: WindowManager, path: string) =
     var clients = newJArray()
     for client in monitor.clients.items:
       clients.add this.clientJson(client, focused)
+    var trayJson = newJArray()
+    if monitor.statusBar != nil and monitor.isStatusBarEnabled:
+      for region in monitor.statusBar.trayLayout():
+        trayJson.add %*{
+          "uid": region.uid, "id": region.id, "status": $region.status,
+          "hasIcon": region.hasIcon, "icon": region.icon, "x": region.x, "width": region.width
+        }
     monitors.add %*{
       "id": monitor.id.int,
       "selected": monitor == this.selectedMonitor,
@@ -477,6 +504,7 @@ proc dumpState*(this: WindowManager, path: string) =
       "selectedTags": selectedTags,
       "barVisible": monitor.statusBar != nil and monitor.isStatusBarEnabled,
       "barHeight": monitor.barHeight.int,
+      "tray": trayJson,
       "clients": clients
     }
   var scratch = newJArray()
@@ -1208,7 +1236,11 @@ proc handleBarClicks(this: WindowManager) =
 
     let
       bar = click.bar
-      clicked = bar.regionAt(click.x, click.y)
+      trayIcon = bar.trayIconAt(click.x, click.y)
+    if trayIcon.uid >= 0 and this.tray != nil:
+      this.tray.click(trayIcon.uid, click.button, trayIcon.x, trayIcon.y)
+      continue
+    let clicked = bar.regionAt(click.x, click.y)
     if clicked.regionID == -1:
       # Nothing was clicked
       continue
@@ -1552,9 +1584,11 @@ proc applyRenderState(this: WindowManager) =
     if seat.layerFocus == lfExclusive:
       focusedClient = nil
 
+  let trayOn = this.trayMonitor()
   for monitor in this.monitors.values():
     let settings = monitor.windowSettings
     if monitor.statusBar != nil:
+      monitor.statusBar.setTray(if monitor == trayOn: this.tray else: nil)
       monitor.syncStatusBar(monitor == this.selectedMonitor)
       # Below the layer surfaces reserving space at the top.
       monitor.statusBar.flush(

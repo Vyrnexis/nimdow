@@ -29,6 +29,22 @@ const
 
 proc cairo_image_surface_create_for_data*(data: pointer, format: cint,
     width, height, stride: cint): CairoSurface {.importc, cdecl.}
+proc cairo_image_surface_create*(format: cint, width, height: cint): CairoSurface
+  {.importc, cdecl.}
+proc cairo_image_surface_create_from_png*(filename: cstring): CairoSurface
+  {.importc, cdecl.}
+proc cairo_image_surface_get_data*(s: CairoSurface): pointer {.importc, cdecl.}
+proc cairo_image_surface_get_stride*(s: CairoSurface): cint {.importc, cdecl.}
+proc cairo_image_surface_get_width*(s: CairoSurface): cint {.importc, cdecl.}
+proc cairo_image_surface_get_height*(s: CairoSurface): cint {.importc, cdecl.}
+proc cairo_surface_status*(s: CairoSurface): cint {.importc, cdecl.}
+proc cairo_surface_mark_dirty*(s: CairoSurface) {.importc, cdecl.}
+proc cairo_set_source_surface*(cr: Cairo, s: CairoSurface, x, y: cdouble)
+  {.importc, cdecl.}
+proc cairo_save*(cr: Cairo) {.importc, cdecl.}
+proc cairo_restore*(cr: Cairo) {.importc, cdecl.}
+proc cairo_translate*(cr: Cairo, x, y: cdouble) {.importc, cdecl.}
+proc cairo_scale*(cr: Cairo, x, y: cdouble) {.importc, cdecl.}
 proc cairo_surface_destroy*(s: CairoSurface) {.importc, cdecl.}
 proc cairo_surface_set_device_scale*(s: CairoSurface, x, y: cdouble)
   {.importc, cdecl.}

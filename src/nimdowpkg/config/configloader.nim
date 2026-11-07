@@ -47,6 +47,8 @@ type
     # Hex values
     fgColor*, bgColor*, selectionColor*, urgentColor*, hasWindowsColor*: int
     transparency*: uint8
+    ## Tray icon size is the bar height minus twice the padding.
+    trayIconPadding*, trayIconSpacing*: uint
   ScratchpadSettings* = object
     width*: int
     height*: int
@@ -69,6 +71,10 @@ type
     scratchpadSettings*: ScratchpadSettings
     loggingEnabled*: bool
     reverseTagScrolling*: bool
+    trayEnabled*: bool
+    ## 1-based index of the monitor (in screen order) whose bar shows the tray; 0 follows the selected monitor.
+    trayMonitor*: int
+    trayIconTheme*: string
     tagKeys*: seq[string]
     defaultMonitorSettings*: MonitorSettings
     # Specific monitor settings
@@ -93,6 +99,8 @@ proc newConfig*(): Config =
     ),
 
     loggingEnabled: false,
+    trayEnabled: true,
+    trayMonitor: 1,
     reverseTagScrolling: false
   )
 
@@ -192,7 +200,9 @@ proc populateDefaultMonitorSettings(this: Config) =
       bgColor: 0x1c1b19,
       selectionColor: 0x519f50,
       urgentColor: 0xef2f27,
-      hasWindowsColor: 0xfce8c3
+      hasWindowsColor: 0xfce8c3,
+      trayIconPadding: 2,
+      trayIconSpacing: 4
   )
 
   this.defaultMonitorSettings.layoutSettings = LayoutSettings(
@@ -401,6 +411,15 @@ proc populateBarSettings*(this: Config, barSettings: var BarSettings, settingsTa
     if showIndicator.kind == TomlValueKind.Bool:
       barSettings.showIndicator = showIndicator.boolVal
 
+  for (key, field) in [("trayIconPadding", addr barSettings.trayIconPadding),
+                       ("trayIconSpacing", addr barSettings.trayIconSpacing)]:
+    if settingsTable.hasKey(key):
+      let value = settingsTable[key]
+      if value.kind == TomlValueKind.Int:
+        field[] = max(0, value.intVal).uint
+      else:
+        log key & " is not an integer value!", lvlWarn
+
   if settingsTable.hasKey("barHeight"):
     let barHeight = settingsTable["barHeight"]
     if barHeight.kind == TomlValueKind.Int:
@@ -459,6 +478,27 @@ proc populateGeneralSettings*(this: Config, configTable: TomlTable) =
       this.loggingEnabled = loggingEnabledSetting.boolVal
     else:
       log "loggingEnabled is not true/false!", lvlWarn
+
+  if settingsTable.hasKey("trayEnabled"):
+    let trayEnabled = settingsTable["trayEnabled"]
+    if trayEnabled.kind == TomlValueKind.Bool:
+      this.trayEnabled = trayEnabled.boolVal
+    else:
+      log "trayEnabled is not true/false!", lvlWarn
+
+  if settingsTable.hasKey("trayMonitor"):
+    let trayMonitor = settingsTable["trayMonitor"]
+    if trayMonitor.kind == TomlValueKind.Int:
+      this.trayMonitor = max(0, trayMonitor.intVal)
+    else:
+      log "trayMonitor is not an integer value!", lvlWarn
+
+  if settingsTable.hasKey("trayIconTheme"):
+    let trayIconTheme = settingsTable["trayIconTheme"]
+    if trayIconTheme.kind == TomlValueKind.String:
+      this.trayIconTheme = trayIconTheme.stringVal
+    else:
+      log "trayIconTheme is not a string!", lvlWarn
 
   if settingsTable.hasKey("reverseTagScrolling"):
     let reverseTagScrollingSetting = settingsTable["reverseTagScrolling"]

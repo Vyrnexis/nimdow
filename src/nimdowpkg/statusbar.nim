@@ -31,6 +31,7 @@ import
   wl/client as wlclient,
   wl/cairo,
   wl/cursor,
+  tray/tray,
   wl/protocols/[river_window_management_v1, viewporter, fractional_scale_v1]
 
 const
@@ -60,6 +61,8 @@ type
     scale120: int
     visible: bool
     configGen: int
+    ## `Tray.version` while this bar shows the tray, else -1.
+    trayVersion: int
 
   ShmBuffer = ref object
     ctx: BarContext
@@ -95,6 +98,21 @@ type
     # Drawing context, only valid while drawing.
     cr: Cairo
     clickables: seq[tuple[start: int, stop: int, characters: seq[int]]]
+    tray: Tray
+    ## The tray icons as drawn last (surface coordinates), see `trayLayout`.
+    trayRegions: seq[TrayRegion]
+    ## Position of the bar on the screen, from the last `flush`.
+    originX, originY: int
+
+  TrayRegion* = object
+    uid*: int
+    id*: string
+    status*: ItemStatus
+    hasIcon*: bool
+    ## Where the icon came from (file path or pixmap summary).
+    icon*: string
+    ## Logical x of the icon in the bar, and its width (= height).
+    x*, width*: int
 
   ClickedRegion* = object
     regionID*: int
@@ -481,6 +499,8 @@ proc newStatusBar*(
   result = StatusBar(
     ctx: ctx, settings: settings, tagSettings: tagSettings, ellipsizeWidth: -1
   )
+  result.wanted.trayVersion = -1
+  result.drawn.trayVersion = -1
   GC_ref result
   result.surface = wl_compositor_create_surface(ctx.compositor)
   wl_surface_set_user_data(result.surface, cast[pointer](result))
@@ -532,6 +552,27 @@ proc update*(this: StatusBar, tags: seq[BarTag], title: string, monitorSelected:
   this.wanted.tags = tags
   this.wanted.title = title
   this.wanted.monitorSelected = monitorSelected
+
+proc setTray*(this: StatusBar, tray: Tray) =
+  ## Shows the tray on this bar (nil: no tray here).
+  this.tray = tray
+  this.wanted.trayVersion = if tray != nil: tray.version else: -1
+
+proc trayLayout*(this: StatusBar): seq[TrayRegion] =
+  ## The icons of the last draw, with x relative to the screen.
+  for region in this.trayRegions:
+    var r = region
+    r.x += this.originX
+    result.add r
+
+proc trayIconAt*(this: StatusBar, x, y: int): tuple[uid, x, y: int] =
+  ## The tray icon under the surface position (uid -1: none), with the icon's
+  ## position on the screen.
+  result = (-1, 0, 0)
+  for region in this.trayRegions:
+    if x >= region.x and x < region.x + region.width and y >= 0 and y < this.wanted.height:
+      return (region.uid, this.originX + region.x,
+        this.originY + (this.wanted.height - region.width) div 2)
 
 proc setStatus*(this: StatusBar, status: string) =
   this.wanted.status = status
@@ -976,14 +1017,61 @@ proc renderTags(this: StatusBar): int =
 
   return textXPos
 
-proc renderStatus(this: StatusBar): int =
-  ## Returns the x position where the status starts.
+proc renderTray(this: StatusBar): int =
+  ## Draws the tray icons at the right edge. Returns the x position where the
+  ## tray starts (the right edge when there are no icons).
   result = this.wanted.width - rightPadding
+  this.trayRegions.setLen 0
+  if this.wanted.trayVersion < 0 or this.tray == nil:
+    return
+  let
+    items = this.tray.visibleItems()
+    padding = max(0, this.settings.trayIconPadding.int)
+    spacing = max(0, this.settings.trayIconSpacing.int)
+    size = max(1, this.wanted.height - 2 * padding)
+    pixels = max(1, (size * this.scale120 + 60) div 120)
+  if items.len == 0:
+    return
+  var x = this.wanted.width - rightPadding - (items.len * size + (items.len - 1) * spacing)
+  result = x - spacing
+  let y = (this.wanted.height - size) div 2
+  for item in items:
+    let (surface, real, desc) = item.iconSurface(pixels)
+    if surface != nil:
+      cairo_save(this.cr)
+      cairo_translate(this.cr, x.cdouble, y.cdouble)
+      cairo_scale(this.cr, size.float / pixels.float, size.float / pixels.float)
+      cairo_set_source_surface(this.cr, surface, 0, 0)
+      cairo_paint(this.cr)
+      cairo_restore(this.cr)
+    else:
+      # No icon: the first letter of the id or title in a box.
+      let
+        fg = toColor(this.settings.fgColor)
+        label = (if item.id.len > 0: item.id else: item.title).strip()
+      this.fillRect((fg.r, fg.g, fg.b, 0.35), x, y, size, size)
+      if label.len > 0:
+        let letter = sanitize($label.runeAt(0)).toUpper()
+        let layout = this.newLayout(letter, this.allFonts)
+        var w, h: cint
+        pango_layout_get_pixel_size(layout, addr w, addr h)
+        cairo_set_source_rgba(this.cr, fg.r, fg.g, fg.b, fg.a)
+        cairo_move_to(this.cr, (x + (size - w) div 2).cdouble, (y + (size - h) div 2).cdouble)
+        pango_cairo_show_layout(this.cr, layout)
+        g_object_unref(layout)
+    this.trayRegions.add TrayRegion(
+      uid: item.uid, id: item.id, status: item.status, hasIcon: real, icon: desc, x: x, width: size
+    )
+    x += size + spacing
+
+proc renderStatus(this: StatusBar, rightEdge: int): int =
+  ## Returns the x position where the status starts.
+  result = rightEdge
   if this.wanted.status.len > 0:
     result = this.renderStringRightAligned(
       sanitize(this.wanted.status),
       toColor(this.settings.fgColor),
-      this.wanted.width - rightPadding,
+      rightEdge,
       2
     )
 
@@ -1046,7 +1134,8 @@ proc draw(this: StatusBar, data: pointer) =
   # The title needs to know where the status starts, but the click regions are
   # ordered tags, title, status.
   let tagRegions = this.clickables.len
-  let statusLeft = this.renderStatus()
+  let trayLeft = this.renderTray()
+  let statusLeft = this.renderStatus(trayLeft)
   let statusRegions = this.clickables[tagRegions .. ^1]
   this.clickables.setLen tagRegions
   this.renderActiveWindowTitle(tagLengthPixels, statusLeft - boxWidth * 2)
@@ -1093,6 +1182,8 @@ proc flush*(this: StatusBar, x, y, width: int, visible: bool) =
   ## Positions the bar's node and, if anything changed, redraws and commits it.
   ## Only valid during a manage or render sequence.
   river_node_v1_set_position(this.node, x.int32, y.int32)
+  this.originX = x
+  this.originY = y
 
   this.wanted.width = width
   this.wanted.height = this.settings.height.int
@@ -1101,6 +1192,7 @@ proc flush*(this: StatusBar, x, y, width: int, visible: bool) =
   this.wanted.configGen = this.configGen
 
   if not this.wanted.visible:
+    this.trayRegions.setLen 0
     if this.drawn.visible:
       # Unmap the bar.
       river_shell_surface_v1_sync_next_commit(this.shell)

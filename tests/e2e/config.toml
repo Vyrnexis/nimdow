@@ -40,6 +40,8 @@ exec = [
 ]
 
 [settings]
+  # Deterministic tray icon lookup (see tests/e2e/fake_sni.py).
+  trayIconTheme = "Adwaita"
   # Window settings
   borderWidth = 1
   borderColorUnfocused = "#282a36"
