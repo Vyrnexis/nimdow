@@ -1053,7 +1053,8 @@ proc renderTags(this: StatusBar): int =
     urgent = toColor(this.settings.urgentColor)
 
   var
-    textXPos: int = boxWidth * 2
+    pad = this.settings.tagPadding.int
+    textXPos: int = pad
     i = 0
   for tagID, tagSetting in this.tagSettings.pairs():
     let state =
@@ -1072,10 +1073,10 @@ proc renderTags(this: StatusBar): int =
       info = this.measure(text, this.allFonts)
 
     if not state.empty:
-      let boxXLoc = textXPos - boxWidth
+      let boxXLoc = textXPos - pad div 2
       if state.urgent:
         this.fillRect(
-          urgent, boxXLoc - boxWidth, 0, info.width + boxWidth * 4, this.wanted.height
+          urgent, textXPos - pad, 0, info.width + pad * 2, this.wanted.height
         )
       if this.settings.showIndicator:
         this.fillRect(fgColor, boxXLoc, 0, 4, 4)
@@ -1084,11 +1085,11 @@ proc renderTags(this: StatusBar): int =
 
     this.drawText(text, this.allFonts, textXPos, fgColor)
     this.clickables.add (
-      start: textXPos - boxWidth * 2,
-      stop: textXPos + info.width + boxWidth * 2,
+      start: textXPos - pad,
+      stop: textXPos + info.width + pad,
       characters: info.characters
     )
-    textXPos += info.width + boxWidth * 4
+    textXPos += info.width + pad * 2
 
   return textXPos
 

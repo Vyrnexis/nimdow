@@ -49,6 +49,8 @@ type
     transparency*: uint8
     ## Tray icon size is the bar height minus twice the padding.
     trayIconPadding*, trayIconSpacing*: uint
+    ## Space on each side of a tag label in the bar.
+    tagPadding*: uint
     ## Tray context menus: border color (hex) and minimum width.
     menuBorderColor*: int
     menuWidthMin*: uint
@@ -206,6 +208,7 @@ proc populateDefaultMonitorSettings(this: Config) =
       hasWindowsColor: 0xfce8c3,
       trayIconPadding: 2,
       trayIconSpacing: 4,
+      tagPadding: 8,
       menuBorderColor: 0x519f50,
       menuWidthMin: 150
   )
@@ -422,7 +425,8 @@ proc populateBarSettings*(this: Config, barSettings: var BarSettings, settingsTa
 
   for (key, field) in [("trayIconPadding", addr barSettings.trayIconPadding),
                        ("trayIconSpacing", addr barSettings.trayIconSpacing),
-                       ("menuWidthMin", addr barSettings.menuWidthMin)]:
+                       ("menuWidthMin", addr barSettings.menuWidthMin),
+                       ("barTagPadding", addr barSettings.tagPadding)]:
     if settingsTable.hasKey(key):
       let value = settingsTable[key]
       if value.kind == TomlValueKind.Int:

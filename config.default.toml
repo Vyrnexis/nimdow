@@ -62,6 +62,7 @@ exec = [
   barUrgentColor = "#ff5555"
   barHasWindowsColor = "#f5e0dc"
   barShowIndicator = false
+  #barTagPadding = 8 # space on each side of a tag label
   barTransparency = 255 # 0 to 255
   barFonts = [
     "monospace:size=10:antialias=true",

@@ -83,6 +83,8 @@ using `river-window-management-v1`. X11 is no longer supported.
 - Layer shell clients (launchers, notifications, wallpapers, other bars such as noctalia) are supported;
   their exclusive zones shrink the tiled area and nimdow's own bar is placed below them.
 - The bar is rendered at the output's (fractional) scale.
+- `barTagPadding` (default `8`) sets the space on each side of a tag label; raise it for icon tags
+  (e.g. Nerd Font glyphs in `displayString`).
 
 - Floating windows (rules, scratchpad, dialogs) are placed and clamped inside the usable area, i.e. the
   output minus layer shell exclusive zones and nimdow's bar.
