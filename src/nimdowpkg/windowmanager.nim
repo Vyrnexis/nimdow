@@ -6,6 +6,7 @@ import
   taggedclients,
   monitor,
   statusbar,
+  menupopup,
   tray/tray,
   tag,
   area,
@@ -86,6 +87,8 @@ type
     opEdges: uint32
     ## Window that was last sent to River as keyboard focus.
     focused: Window
+    ## Shell surface (a tray menu popup) that was last sent as keyboard focus.
+    focusedShell: RiverShellSurfaceV1
     ## Window interacted with (clicked) since the last manage sequence.
     interacted: Window
 
@@ -116,6 +119,12 @@ type
     barCtx: BarContext
     ## The system tray; nil when disabled or without a D-Bus session bus.
     tray*: Tray
+    ## The popups of the tray's context menu; nil without the bar.
+    menu: MenuManager
+    ## The tags (all monitors) when the open menu was first seen: it closes
+    ## when they change.
+    menuTagGen: int
+    menuTagSig: string
     ## The status as set with `setStatus` (may contain per monitor statuses).
     status: string
     ## Key combos pressed since the last manage sequence.
@@ -514,6 +523,7 @@ proc dumpState*(this: WindowManager, path: string) =
   for client in this.unassigned:
     unassigned.add this.clientJson(client, focused)
   let state = %*{
+    "menu": (if this.menu != nil: this.menu.dumpJson(this.tray) else: %*{"open": false}),
     "monitors": monitors,
     "scratchpad": scratch,
     "unassigned": unassigned,
@@ -873,6 +883,10 @@ proc syncOutputs(this: WindowManager) =
           client.sentFullscreenOutput = nil
           this.unassigned.add client
         if monitor.statusBar != nil:
+          if this.tray != nil:
+            # Its popups use the bar's font.
+            this.tray.closeMenu()
+            this.menu.manage(this.tray, nil, (0, 0, 0, 0))
           monitor.statusBar.destroy()
           monitor.statusBar = nil
         for id, m in this.monitors.pairs:
@@ -1240,6 +1254,9 @@ proc handleBarClicks(this: WindowManager) =
     if trayIcon.uid >= 0 and this.tray != nil:
       this.tray.click(trayIcon.uid, click.button, trayIcon.x, trayIcon.y)
       continue
+    # Any other click on the bar dismisses the tray menu.
+    if this.tray != nil:
+      this.tray.closeMenu()
     let clicked = bar.regionAt(click.x, click.y)
     if clicked.regionID == -1:
       # Nothing was clicked
@@ -1280,6 +1297,39 @@ proc selectClient(this: WindowManager, client: Client) =
   if monitor != nil:
     this.selectedMonitor = monitor
     monitor.setSelectedClient(client)
+
+proc tagSignature(this: WindowManager): string =
+  for monitor in this.sortedMonitors():
+    result.add $monitor.id & ":"
+    var tags: seq[int]
+    for id in monitor.selectedTags:
+      tags.add id.int
+    tags.sort()
+    result.add $tags & ";"
+
+proc manageMenu(this: WindowManager) =
+  ## Closes the tray menu when the tags changed and lets the popups follow the
+  ## tray's menu session. Manage sequence only.
+  if this.menu == nil:
+    return
+  var
+    bar: StatusBar
+    area: tuple[x, y, w, h: int]
+  let session = if this.tray != nil: this.tray.menu else: nil
+  if session != nil:
+    let sig = this.tagSignature()
+    if this.menuTagGen != session.gen:
+      this.menuTagGen = session.gen
+      this.menuTagSig = sig
+    elif sig != this.menuTagSig:
+      this.tray.closeMenu()
+    if this.tray.menu != nil:
+      let (_, monitor) = this.monitors.find(session.anchorX, session.anchorY)
+      if monitor != nil and monitor.statusBar != nil and monitor.isStatusBarEnabled:
+        bar = monitor.statusBar
+        let usable = monitor.usableArea()
+        area = (usable.x.int, usable.y.int, usable.width.int, usable.height.int)
+  this.menu.manage(this.tray, bar, area)
 
 proc startSeatOp(
   this: WindowManager, seat: Seat, client: Client, kind: PointerRequestKind, edges: uint32
@@ -1435,6 +1485,20 @@ proc applyManageState(this: WindowManager) =
       # A layer surface holds the keyboard; River ignores focus requests until
       # focus_none, after which the window is focused again.
       continue
+    let menuShell = if this.menu != nil: this.menu.keyboardShell() else: nil
+    if menuShell != nil:
+      # The tray menu takes the keyboard while it is open.
+      if seat.focusedShell != menuShell:
+        river_seat_v1_focus_shell_surface(seat.obj, menuShell)
+        seat.focusedShell = menuShell
+        seat.focused = nil
+      continue
+    if seat.focusedShell != nil:
+      # Back to the window that had the focus.
+      seat.focusedShell = nil
+      seat.focused = nil
+      if focusTarget == nil:
+        river_seat_v1_clear_focus(seat.obj)
     if focusTarget != nil:
       if seat.focused != focusTarget.window:
         river_seat_v1_focus_window(seat.obj, focusTarget.window)
@@ -1527,6 +1591,9 @@ proc onManageStart(this: WindowManager) =
       if seat.layerFocus == lfNonExclusive:
         # A click on a window takes focus back from the layer surface.
         seat.focused = nil
+      # A click on a window dismisses the tray menu.
+      if this.tray != nil:
+        this.tray.closeMenu()
       if client != nil:
         this.selectClient(client)
 
@@ -1555,6 +1622,7 @@ proc onManageStart(this: WindowManager) =
   for seat in this.seats:
     this.manageSeatOp(seat)
 
+  this.manageMenu()
   this.applyManageState()
   river_window_manager_v1_manage_finish(this.manager)
 
@@ -1637,6 +1705,10 @@ proc applyRenderState(this: WindowManager) =
       if client.isVisible and client.isFullscreen:
         river_node_v1_place_top(client.node)
 
+  # The tray menu above everything.
+  if this.menu != nil:
+    this.menu.flush()
+
 proc onRenderStart(this: WindowManager) =
   this.applyRenderState()
   river_window_manager_v1_render_finish(this.manager)
@@ -1709,6 +1781,7 @@ proc newWindowManager*(config: Config, configTable: TomlTable): WindowManager =
     log "wl_compositor/wl_shm not available: the status bar is disabled", lvlWarn
   else:
     result.barCtx.requestManage = proc() = wm.markDirty()
+    result.menu = newMenuManager(result.barCtx)
 
   # Config setup
   try:

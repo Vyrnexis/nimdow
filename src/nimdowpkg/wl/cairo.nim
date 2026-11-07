@@ -57,6 +57,11 @@ proc cairo_rectangle*(cr: Cairo, x, y, w, h: cdouble) {.importc, cdecl.}
 proc cairo_fill*(cr: Cairo) {.importc, cdecl.}
 proc cairo_paint*(cr: Cairo) {.importc, cdecl.}
 proc cairo_move_to*(cr: Cairo, x, y: cdouble) {.importc, cdecl.}
+proc cairo_line_to*(cr: Cairo, x, y: cdouble) {.importc, cdecl.}
+proc cairo_arc*(cr: Cairo, xc, yc, radius, angle1, angle2: cdouble) {.importc, cdecl.}
+proc cairo_new_path*(cr: Cairo) {.importc, cdecl.}
+proc cairo_stroke*(cr: Cairo) {.importc, cdecl.}
+proc cairo_set_line_width*(cr: Cairo, width: cdouble) {.importc, cdecl.}
 
 # --- pango ---
 

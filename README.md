@@ -132,7 +132,17 @@ SVG icons need librsvg.
 - Settings (in `[settings]`): `trayEnabled` (default `true`, read at startup), `trayMonitor` (default `1`, the
   first monitor; `0` follows the selected monitor), `trayIconPadding` (default `2`), `trayIconSpacing`
   (default `4`), `trayIconTheme`.
-- Not implemented yet: the dbusmenu popup (right click only calls the item's `ContextMenu`), tooltips.
+- Context menus: right click opens the item's `com.canonical.dbusmenu` (its `Menu` object path) as a popup under
+  the icon, drawn with the bar's font and colors; left click does so for items with `ItemIsMenu`. Items without
+  a `Menu` get `ContextMenu(x, y)` instead. Entries: labels (mnemonics stripped), separators, check/radio marks,
+  icons (`icon-name`), disabled entries, submenus (opened on hover or click, to the right of their parent or to
+  the left at the screen edge). The menu closes after an activation, with Escape, when clicking elsewhere on the
+  bar, on a window or on the icon again, on a tag change, or when the item disappears. Keyboard: Up/Down (skip
+  separators and disabled entries), Right/Enter/Space (open submenu/activate), Left (close submenu), Escape. The
+  menu takes the keyboard focus (the previous window gets it back when it closes). The menu follows
+  `LayoutUpdated`/`ItemsPropertiesUpdated`. Settings: `menuBorderColor` (default: `barSelectionColor`),
+  `menuWidthMin` (default `150`).
+- Not implemented yet: tooltips, scrolling of menus taller than the screen.
 
 ### Setting the status <a name="setting-status"></a>
 

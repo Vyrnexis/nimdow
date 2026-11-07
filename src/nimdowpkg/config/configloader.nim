@@ -49,6 +49,9 @@ type
     transparency*: uint8
     ## Tray icon size is the bar height minus twice the padding.
     trayIconPadding*, trayIconSpacing*: uint
+    ## Tray context menus: border color (hex) and minimum width.
+    menuBorderColor*: int
+    menuWidthMin*: uint
   ScratchpadSettings* = object
     width*: int
     height*: int
@@ -202,7 +205,9 @@ proc populateDefaultMonitorSettings(this: Config) =
       urgentColor: 0xef2f27,
       hasWindowsColor: 0xfce8c3,
       trayIconPadding: 2,
-      trayIconSpacing: 4
+      trayIconSpacing: 4,
+      menuBorderColor: 0x519f50,
+      menuWidthMin: 150
   )
 
   this.defaultMonitorSettings.layoutSettings = LayoutSettings(
@@ -390,6 +395,10 @@ proc populateBarSettings*(this: Config, barSettings: var BarSettings, settingsTa
   if selectionColor != -1:
     barSettings.selectionColor = selectionColor
 
+  let menuBorderColor = this.loadHexValue(settingsTable, "menuBorderColor")
+  barSettings.menuBorderColor =
+    if menuBorderColor != -1: menuBorderColor else: barSettings.selectionColor
+
   let urgentColor = this.loadHexValue(settingsTable, "barUrgentColor")
   if urgentColor != -1:
     barSettings.urgentColor = urgentColor
@@ -412,7 +421,8 @@ proc populateBarSettings*(this: Config, barSettings: var BarSettings, settingsTa
       barSettings.showIndicator = showIndicator.boolVal
 
   for (key, field) in [("trayIconPadding", addr barSettings.trayIconPadding),
-                       ("trayIconSpacing", addr barSettings.trayIconSpacing)]:
+                       ("trayIconSpacing", addr barSettings.trayIconSpacing),
+                       ("menuWidthMin", addr barSettings.menuWidthMin)]:
     if settingsTable.hasKey(key):
       let value = settingsTable[key]
       if value.kind == TomlValueKind.Int:

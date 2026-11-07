@@ -127,19 +127,36 @@ type
     ## 1 left, 2 middle, 3 right, 4 scroll up, 5 scroll down.
     button*: int
 
+  ## A non-bar surface (a menu popup) that receives the pointer events of
+  ## its `surface`. Positions are surface coordinates; `button` gets X11 style
+  ## button numbers (1 left, 2 middle, 3 right).
+  InputTarget* = ref object
+    surface*: WlSurface
+    ## Scale (x120) used for the cursor image.
+    scale120*: int
+    enter*, motion*: proc(x, y: int) {.closure.}
+    button*: proc(button, x, y: int) {.closure.}
+    leave*: proc() {.closure.}
+
   BarPointer = ref object
     obj: WlPointer
     ctx: BarContext
     focus: StatusBar
+    target: InputTarget
     x, y: int
     axisAcc: float
 
   BarContext* = ref object
-    compositor: WlCompositor
-    shm: WlShm
-    manager: RiverWindowManagerV1
-    viewporter: WpViewporter
-    fractionalManager: WpFractionalScaleManagerV1
+    compositor*: WlCompositor
+    shm*: WlShm
+    manager*: RiverWindowManagerV1
+    viewporter*: WpViewporter
+    fractionalManager*: WpFractionalScaleManagerV1
+    ## Popup surfaces that get pointer input (see `InputTarget`).
+    targets*: seq[InputTarget]
+    ## Called with every wl_keyboard created for a seat (the menu popup adds
+    ## its listener there).
+    onKeyboard*: proc(keyboard: WlKeyboard) {.closure.}
     # Pointer cursor
     cursorSurface: WlSurface
     cursorTheme: WlCursorTheme
@@ -205,25 +222,44 @@ proc pointerEnter(data: pointer, obj: WlPointer, serial: uint32, surface: WlSurf
     x, y: WlFixed) {.cdecl.} =
   let p = cast[BarPointer](data)
   p.focus = nil
+  p.target = nil
+  p.x = wlFixedToFloat(x).int
+  p.y = wlFixedToFloat(y).int
+  p.axisAcc = 0
   if not surface.isNil:
+    for target in p.ctx.targets:
+      if target.surface == surface:
+        p.target = target
+        p.setCursor(serial, max(1, (target.scale120 + 119) div 120))
+        if target.enter != nil:
+          target.enter(p.x, p.y)
+        return
     let bar = wl_surface_get_user_data(surface)
     if bar != nil:
       p.focus = cast[StatusBar](bar)
       p.setCursor(serial, max(1, (p.focus.scale120 + 119) div 120))
-  p.x = wlFixedToFloat(x).int
-  p.y = wlFixedToFloat(y).int
-  p.axisAcc = 0
 
 proc pointerLeave(data: pointer, obj: WlPointer, serial: uint32,
     surface: WlSurface) {.cdecl.} =
-  cast[BarPointer](data).focus = nil
+  let p = cast[BarPointer](data)
+  p.focus = nil
+  let target = p.target
+  p.target = nil
+  if target != nil and target.leave != nil:
+    target.leave()
 
 proc pointerMotion(data: pointer, obj: WlPointer, time: uint32, x, y: WlFixed) {.cdecl.} =
   let p = cast[BarPointer](data)
   p.x = wlFixedToFloat(x).int
   p.y = wlFixedToFloat(y).int
+  if p.target != nil and p.target.motion != nil:
+    p.target.motion(p.x, p.y)
 
 proc queueClick(p: BarPointer, button: int) =
+  if p.target != nil:
+    if p.target.button != nil:
+      p.target.button(button, p.x, p.y)
+    return
   if p.focus == nil:
     return
   p.ctx.clicks.add BarClick(bar: p.focus, x: p.x, y: p.y, button: button)
@@ -267,6 +303,7 @@ type SeatData = ref object
   ctx: BarContext
   seat: WlSeat
   pointer: BarPointer
+  keyboard: WlKeyboard
 
 proc seatCapabilities(data: pointer, seat: WlSeat, caps: uint32) {.cdecl.} =
   let s = cast[SeatData](data)
@@ -281,6 +318,13 @@ proc seatCapabilities(data: pointer, seat: WlSeat, caps: uint32) {.cdecl.} =
     wl_pointer_release(s.pointer.obj)
     GC_unref s.pointer
     s.pointer = nil
+  if (caps and WL_SEAT_CAPABILITY_KEYBOARD) != 0 and s.keyboard.isNil:
+    s.keyboard = wl_seat_get_keyboard(seat)
+    if s.ctx.onKeyboard != nil:
+      s.ctx.onKeyboard(s.keyboard)
+  elif (caps and WL_SEAT_CAPABILITY_KEYBOARD) == 0 and not s.keyboard.isNil:
+    wl_keyboard_release(s.keyboard)
+    s.keyboard = nil
 
 var seatListener = wl_seat_noop_listener()
 seatListener.capabilities = seatCapabilities
@@ -518,6 +562,15 @@ proc newStatusBar*(
   result.node = river_shell_surface_v1_get_node(result.shell)
   result.configureFonts()
 
+proc removeTarget*(ctx: BarContext, target: InputTarget) =
+  ## Stops routing pointer events to the target (its surface is going away).
+  let index = ctx.targets.find(target)
+  if index >= 0:
+    ctx.targets.delete index
+  for pointer in ctx.pointers:
+    if pointer.target == target:
+      pointer.target = nil
+
 proc destroy*(this: StatusBar) =
   ## Releases the bar's Wayland objects. The bar must not be used afterwards.
   for pointer in this.ctx.pointers:
@@ -546,6 +599,16 @@ proc setConfig*(this: StatusBar, settings: BarSettings, tagSettings: TagSettings
   inc this.configGen
 
 proc height*(this: StatusBar): int = this.settings.height.int
+
+proc barSettings*(this: StatusBar): BarSettings = this.settings
+
+proc fontDescription*(this: StatusBar): PangoFontDescription =
+  ## The bar's font (owned by the bar).
+  this.allFonts
+
+proc scale120*(this: StatusBar): int = this.scale120
+
+proc origin*(this: StatusBar): tuple[x, y: int] = (this.originX, this.originY)
 
 proc update*(this: StatusBar, tags: seq[BarTag], title: string, monitorSelected: bool) =
   ## Sets what the bar shows for tags and the focused window; drawn by `flush`.

@@ -3,7 +3,7 @@
 with --watcher, a fake StatusNotifierWatcher). Uses the session bus
 (DBUS_SESSION_BUS_ADDRESS), so run it inside `dbus-run-session`.
 
-  fake_sni.py item    --variant name|pixmap --log FILE [--id ID] [--theme-path DIR]
+  fake_sni.py item    --variant name|pixmap --log FILE [--id ID] [--theme-path DIR] [--item-is-menu] [--no-menu]
   fake_sni.py watcher [--log FILE]
 
 Item behaviour:
@@ -14,8 +14,12 @@ Item behaviour:
   * SIGUSR1: IconName/pixmap changes (name -> "audio-headphones", an SVG;
     pixmap -> green|yellow) and NewIcon is emitted.
   * SIGUSR2: Status toggles Active <-> Passive and NewStatus is emitted.
-  * Exports a minimal com.canonical.dbusmenu at /MenuBar (Menu property); its
-    Event calls are logged, for Phase 7b.
+  * Exports com.canonical.dbusmenu at /MenuBar (Menu property):
+        Open (1), separator (7), "Toggle me" checkmark (2), Disabled (8, enabled=false),
+        More (3, submenu: Sub A 4, Sub B 5), Quit (6).
+    Every Event/AboutToShow call is logged ("ID MenuEvent <id> <name>",
+    "ID MenuAboutToShow <id>"). Clicking "Toggle me" flips its state and emits
+    ItemsPropertiesUpdated. --item-is-menu sets ItemIsMenu=true, --no-menu Menu="/".
 Prints "READY" on stdout once registered.
 """
 import argparse
@@ -71,6 +75,10 @@ MENU_XML = """
     <method name="AboutToShow"><arg type="i" direction="in"/><arg type="b" direction="out"/></method>
     <property name="Version" type="u" access="read"/>
     <property name="Status" type="s" access="read"/>
+    <signal name="ItemsPropertiesUpdated">
+      <arg type="a(ia{sv})"/><arg type="a(ias)"/>
+    </signal>
+    <signal name="LayoutUpdated"><arg type="u"/><arg type="i"/></signal>
   </interface>
 </node>"""
 
@@ -116,6 +124,8 @@ class Item:
     def __init__(self, conn, args, log):
         self.conn, self.args, self.log = conn, args, log
         self.status = "Active"
+        self.toggled = False
+        self.revision = 1
         self.changed_icon = False
         if args.variant == "name":
             self.icon_name = "dialog-information"
@@ -143,8 +153,8 @@ class Item:
             "AttentionIconPixmap": GLib.Variant("a(iiay)", []),
             "IconThemePath": GLib.Variant("s", a.theme_path or ""),
             "ToolTip": GLib.Variant("(sa(iiay)ss)", ("", [], a.id + " tip", "")),
-            "ItemIsMenu": GLib.Variant("b", False),
-            "Menu": GLib.Variant("o", "/MenuBar"),
+            "ItemIsMenu": GLib.Variant("b", bool(a.item_is_menu)),
+            "Menu": GLib.Variant("o", "/" if a.no_menu else "/MenuBar"),
         }
         return values.get(prop)
 
@@ -159,17 +169,43 @@ class Item:
     def on_menu_get(self, conn, sender, path, iface, prop):
         return {"Version": GLib.Variant("u", 3), "Status": GLib.Variant("s", "normal")}.get(prop)
 
+    def menu_props(self, i):
+        """Properties of a menu entry (a{sv})."""
+        v = GLib.Variant
+        table = {
+            1: {"label": v("s", "_Open")},
+            7: {"type": v("s", "separator")},
+            2: {"label": v("s", "Toggle me"), "toggle-type": v("s", "checkmark"),
+                "toggle-state": v("i", 1 if self.toggled else 0)},
+            8: {"label": v("s", "Disabled"), "enabled": v("b", False)},
+            3: {"label": v("s", "More"), "children-display": v("s", "submenu")},
+            4: {"label": v("s", "Sub A")},
+            5: {"label": v("s", "Sub B"), "icon-name": v("s", "dialog-information")},
+            6: {"label": v("s", "Quit __now")},
+        }
+        return table[i]
+
     def on_menu_call(self, conn, sender, path, iface, method, params, invocation):
         if method == "GetLayout":
-            def entry(i, label):
-                return GLib.Variant("(ia{sv}av)", (i, {"label": GLib.Variant("s", label)}, []))
-            children = [GLib.Variant("v", entry(i, f"Item {i}")) for i in (1, 2, 3)]
-            root = (0, {"children-display": GLib.Variant("s", "submenu")}, children)
-            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (1, root)))
+            def entry(i, kids=()):
+                return GLib.Variant("(ia{sv}av)", (i, self.menu_props(i),
+                                                  list(kids)))
+            more = entry(3, [entry(4), entry(5)])
+            top = [entry(1), entry(7), entry(2), entry(8), more, entry(6)]
+            root = (0, {"children-display": GLib.Variant("s", "submenu")},
+                    top)
+            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (self.revision, root)))
         elif method == "Event":
-            self.log(f"{self.args.id} MenuEvent {params.unpack()[0]} {params.unpack()[1]}")
+            mid, name = params.unpack()[0], params.unpack()[1]
+            self.log(f"{self.args.id} MenuEvent {mid} {name}")
+            if mid == 2 and name == "clicked":
+                self.toggled = not self.toggled
+                conn.emit_signal(
+                    None, "/MenuBar", "com.canonical.dbusmenu", "ItemsPropertiesUpdated",
+                    GLib.Variant("(a(ia{sv})a(ias))", ([(2, self.menu_props(2))], [])))
             invocation.return_value(None)
         elif method == "AboutToShow":
+            self.log(f"{self.args.id} MenuAboutToShow {params.unpack()[0]}")
             invocation.return_value(GLib.Variant("(b)", (False,)))
         else:
             invocation.return_value(None)
@@ -239,6 +275,8 @@ def main():
     ap.add_argument("--log", default="")
     ap.add_argument("--id", default="")
     ap.add_argument("--theme-path", default="")
+    ap.add_argument("--item-is-menu", action="store_true")
+    ap.add_argument("--no-menu", action="store_true")
     args = ap.parse_args()
     if not args.id:
         args.id = f"fake-{args.variant}"

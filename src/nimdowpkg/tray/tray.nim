@@ -17,6 +17,11 @@
 ##
 ## Async call replies find their context through a request id passed as the
 ## userdata (so a reply for a removed item is simply ignored).
+##
+## Context menus (com.canonical.dbusmenu, see dbusmenu.nim): `openMenu` starts
+## a `MenuSession` (AboutToShow(0), then GetLayout) whose tree the popup
+## (menupopup.nim) draws. The session follows the menu's LayoutUpdated and
+## ItemsPropertiesUpdated signals with debounced refetches until `closeMenu`.
 
 import
   std/[posix, tables, strutils, os]
@@ -25,9 +30,11 @@ import
   ../dbus/sdbus,
   ../logger,
   ../wl/cairo,
+  dbusmenu,
   icons
 
 export icons.IconPixmap
+export dbusmenu
 
 const
   WatcherName = "org.kde.StatusNotifierWatcher"
@@ -65,13 +72,35 @@ type
     cacheDesc: string
 
   RequestKind = enum
-    rkItemProps, rkWatcherItems, rkHostName, rkWatcherName, rkRegisterHost, rkAction
+    rkItemProps, rkWatcherItems, rkHostName, rkWatcherName, rkRegisterHost, rkAction,
+    rkMenuAbout, rkMenuLayout
 
   Request = object
     kind: RequestKind
     uid: int
     ifaceIndex: int
     what: string
+    ## Menu session the request belongs to, and the menu entry it is about.
+    gen: int
+    menuId: int
+
+  ## An open (or loading) context menu of an item.
+  MenuSession* = ref object
+    gen*: int
+    uid*: int
+    ## The clicked icon's position on the screen.
+    anchorX*, anchorY*: int
+    ## `root` is valid.
+    loaded*: bool
+    root*: MenuEntry
+    ## Incremented whenever `root` is replaced.
+    version*: int
+    ## Where the menu lives.
+    service, owner, path: string
+    slots: seq[SdBusSlot]
+    refetchAt: int64
+    ## Submenus an "opened" event was sent for.
+    openIds: seq[int]
 
   Tray* = ref object
     bus: SdBus
@@ -81,8 +110,10 @@ type
     onChange*: proc() {.closure.}
     uniqueName: string
     hostName: string
-    nextUid, nextRequest: int
+    nextUid, nextRequest, nextMenuGen: int
     requests: Table[int, Request]
+    ## The open context menu (nil: none).
+    menu*: MenuSession
     ownsWatcher*: bool
     hostNameDone, watcherDone, hostNameOwned: bool
     ## Hosts registered with our own watcher.
@@ -132,6 +163,10 @@ proc timeoutMs*(t: Tray): int =
       let wait = max(0'i64, item.refetchAt - nowMs()).int
       if result < 0 or wait < result:
         result = wait
+  if t.menu != nil and t.menu.refetchAt > 0:
+    let wait = max(0'i64, t.menu.refetchAt - nowMs()).int
+    if result < 0 or wait < result:
+      result = wait
 
 proc newRequest(t: Tray, req: Request): pointer =
   inc t.nextRequest
@@ -173,10 +208,14 @@ proc emitProperty(t: Tray, name: string) =
   if t.ownsWatcher and t.bus != nil:
     discard sd_bus_emit_properties_changed(t.bus, WatcherPath, WatcherName, name.cstring, nil)
 
+proc closeMenu*(t: Tray)
+
 proc removeItem(t: Tray, item: TrayItem) =
   let index = t.items.find(item)
   if index < 0:
     return
+  if t.menu != nil and t.menu.uid == item.uid:
+    t.closeMenu()
   t.items.delete index
   item.freeCache()
   t.emitWatcher("StatusNotifierItemUnregistered", item.itemSpec)
@@ -188,6 +227,14 @@ proc removeItem(t: Tray, item: TrayItem) =
 # ---------------------------------------------------------------------------
 
 proc onReply(m: SdBusMessage, userdata: pointer, err: ptr SdBusError): cint {.cdecl.}
+
+proc fetchMenuLayout(t: Tray) =
+  let menu = t.menu
+  if menu == nil or t.bus == nil:
+    return
+  let req = t.newRequest(Request(kind: rkMenuLayout, gen: menu.gen))
+  if not callGetLayout(t.bus, menu.service, menu.path, onReply, req):
+    t.requests.del cast[int](req)
 
 proc fetchItem(t: Tray, item: TrayItem, ifaceIndex: int) =
   let iface =
@@ -336,7 +383,13 @@ proc parseItemProps(m: SdBusMessage, item: TrayItem): bool =
       if sig == "s": item.attentionIconName = readString(m, 's') else: handled = false
     of "IconThemePath":
       if sig == "s": item.themePath = readString(m, 's') else: handled = false
-    of "Menu": (if sig == "o": item.menu = readString(m, 'o') else: handled = false)
+    of "Menu":
+      if sig == "o":
+        item.menu = readString(m, 'o')
+        if item.menu == "/":
+          # "No menu".
+          item.menu = ""
+      else: handled = false
     of "Status":
       if sig == "s":
         case readString(m, 's')
@@ -442,6 +495,34 @@ proc onReply(m: SdBusMessage, userdata: pointer, err: ptr SdBusError): cint {.cd
     of rkAction:
       if failed:
         log "tray: " & req.what & " failed", lvlDebug
+    of rkMenuAbout:
+      let menu = t.menu
+      if menu == nil or menu.gen != req.gen:
+        return 0
+      var needsUpdate: cint
+      if req.menuId == 0:
+        # The result of AboutToShow(0) and its errors do not matter.
+        t.fetchMenuLayout()
+      elif not failed and sd_bus_message_read(m, "b", addr needsUpdate) >= 0 and
+          needsUpdate != 0:
+        t.fetchMenuLayout()
+    of rkMenuLayout:
+      let menu = t.menu
+      if menu == nil or menu.gen != req.gen:
+        return 0
+      var layout: tuple[ok: bool, revision: uint32, root: MenuEntry]
+      if not failed:
+        layout = readLayout(m)
+      if not layout.ok:
+        log "tray: GetLayout failed", lvlDebug
+        if not menu.loaded:
+          t.closeMenu()
+      else:
+        log "tray: menu layout loaded: " & $layout.root.children.len & " entries", lvlDebug
+        menu.root = layout.root
+        menu.loaded = true
+        inc menu.version
+        t.changed()
   except CatchableError:
     log "tray: " & getCurrentExceptionMsg(), lvlError
   return 0
@@ -576,6 +657,10 @@ proc watcherPropVersion(bus: SdBus, path, ifaceName, property: cstring, reply: S
 # ---------------------------------------------------------------------------
 
 proc shutdown(t: Tray) =
+  if t.menu != nil:
+    for slot in t.menu.slots:
+      discard sd_bus_slot_unref(slot)
+    t.menu = nil
   if t.bus != nil:
     sd_bus_close(t.bus)
     sd_bus_unref(t.bus)
@@ -595,6 +680,9 @@ proc process*(t: Tray) =
     if item.refetchAt > 0 and item.refetchAt <= now:
       item.refetchAt = 0
       t.fetchItem(item, 0)
+  if t.menu != nil and t.menu.refetchAt > 0 and t.menu.refetchAt <= now:
+    t.menu.refetchAt = 0
+    t.fetchMenuLayout()
   while t.bus != nil:
     let r = sd_bus_process(t.bus, nil)
     if r < 0:
@@ -690,6 +778,102 @@ proc call(t: Tray, item: TrayItem, member, what: string, types: cstring, a: int 
   if r < 0:
     t.requests.del cast[int](req)
 
+# ---------------------------------------------------------------------------
+# Context menus
+# ---------------------------------------------------------------------------
+
+proc onMenuSignal(m: SdBusMessage, userdata: pointer, err: ptr SdBusError): cint {.cdecl.} =
+  ## LayoutUpdated / ItemsPropertiesUpdated of the open menu: refetch.
+  let t = gTray
+  if t == nil or t.menu == nil or t.menu.gen != cast[int](userdata):
+    return 0
+  if t.menu.refetchAt == 0:
+    t.menu.refetchAt = nowMs() + DebounceMs
+  return 0
+
+proc menuCall(t: Tray, session: MenuSession, id: int, event: string) =
+  ## Event(id, event) of the session's menu (best effort).
+  if t.bus == nil:
+    return
+  let req = t.newRequest(Request(kind: rkAction, what: "menu event " & event))
+  if not callEvent(t.bus, session.service, session.path, id, event,
+      (nowMs() and 0xffffffff).uint32, onReply, req):
+    t.requests.del cast[int](req)
+
+proc closeMenu*(t: Tray) =
+  ## Closes the open context menu: "closed" for its open submenus, signals
+  ## unsubscribed.
+  let menu = t.menu
+  if menu == nil:
+    return
+  t.menu = nil
+  log "tray: menu closed (" & menu.path & ")", lvlDebug
+  for id in menu.openIds:
+    t.menuCall(menu, id, "closed")
+  for slot in menu.slots:
+    discard sd_bus_slot_unref(slot)
+  t.changed()
+
+proc openMenu*(t: Tray, item: TrayItem, x, y: int) =
+  ## Starts the context menu of the item (closing the open one): AboutToShow(0),
+  ## then GetLayout; `t.menu.loaded` tells when the tree can be drawn.
+  t.closeMenu()
+  if t.bus == nil or item.menu.len == 0:
+    return
+  inc t.nextMenuGen
+  let menu = MenuSession(
+    gen: t.nextMenuGen, uid: item.uid, anchorX: x, anchorY: y,
+    service: item.service, owner: if item.owner.len > 0: item.owner else: item.service,
+    path: item.menu
+  )
+  t.menu = menu
+  for member in ["LayoutUpdated", "ItemsPropertiesUpdated"]:
+    var slot: SdBusSlot
+    if sd_bus_match_signal(t.bus, addr slot, menu.owner.cstring, menu.path.cstring,
+        MenuInterface, member.cstring, onMenuSignal, cast[pointer](menu.gen)) >= 0:
+      menu.slots.add slot
+  let req = t.newRequest(Request(kind: rkMenuAbout, gen: menu.gen, menuId: 0))
+  if not callAboutToShow(t.bus, menu.service, menu.path, 0, onReply, req):
+    t.requests.del cast[int](req)
+    t.closeMenu()
+    return
+  t.changed()
+
+proc menuActivate*(t: Tray, id: int) =
+  ## The entry was clicked: Event(id, "clicked"), then the menu closes.
+  let menu = t.menu
+  if menu == nil:
+    return
+  t.menuCall(menu, id, "clicked")
+  t.closeMenu()
+
+proc menuSubmenuOpened*(t: Tray, id: int) =
+  let menu = t.menu
+  if menu == nil or id in menu.openIds:
+    return
+  menu.openIds.add id
+  let req = t.newRequest(Request(kind: rkMenuAbout, gen: menu.gen, menuId: id))
+  if not callAboutToShow(t.bus, menu.service, menu.path, id, onReply, req):
+    t.requests.del cast[int](req)
+  t.menuCall(menu, id, "opened")
+
+proc menuSubmenuClosed*(t: Tray, id: int) =
+  let menu = t.menu
+  if menu == nil or id notin menu.openIds:
+    return
+  menu.openIds.delete menu.openIds.find(id)
+  t.menuCall(menu, id, "closed")
+
+proc menuOpenFor*(t: Tray, uid: int): bool =
+  t != nil and t.menu != nil and t.menu.uid == uid
+
+proc toggleMenu(t: Tray, item: TrayItem, x, y: int) =
+  ## Clicking the icon of the open menu closes it.
+  if t.menuOpenFor(item.uid):
+    t.closeMenu()
+  else:
+    t.openMenu(item, x, y)
+
 proc click*(t: Tray, uid, button, x, y: int) =
   ## A click or scroll on the item's icon (button numbers as in the bar:
   ## 1 left, 2 middle, 3 right, 4 scroll up, 5 scroll down). x/y: the icon's
@@ -699,13 +883,18 @@ proc click*(t: Tray, uid, button, x, y: int) =
     return
   case button
   of 1:
-    # (Phase 7b: a dbusmenu popup replaces ContextMenu for menu items.)
-    if item.isMenu:
+    if item.isMenu and item.menu.len > 0:
+      t.toggleMenu(item, x, y)
+    elif item.isMenu:
       t.call(item, "ContextMenu", "ContextMenu", "ii", x, y)
     else:
       t.call(item, "Activate", "Activate", "ii", x, y)
   of 2: t.call(item, "SecondaryActivate", "SecondaryActivate", "ii", x, y)
-  of 3: t.call(item, "ContextMenu", "ContextMenu", "ii", x, y)
+  of 3:
+    if item.menu.len > 0:
+      t.toggleMenu(item, x, y)
+    else:
+      t.call(item, "ContextMenu", "ContextMenu", "ii", x, y)
   of 4: t.call(item, "Scroll", "Scroll", "is", -1, s = "vertical")
   of 5: t.call(item, "Scroll", "Scroll", "is", 1, s = "vertical")
   else: discard
