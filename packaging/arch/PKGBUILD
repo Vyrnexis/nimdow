@@ -7,7 +7,7 @@
 # but the sources below is downloaded at build time (no nimble, no network in
 # build()).
 pkgname=nimdow-wayland-git
-pkgver=0.7.41.r509.g6ab3261
+pkgver=0.7.41.r513.g62c24b9
 pkgrel=1
 pkgdesc='Nim window manager for the River Wayland compositor, with its own status bar and system tray'
 arch=('x86_64' 'aarch64')

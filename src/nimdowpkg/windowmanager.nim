@@ -976,14 +976,19 @@ proc applyHints(this: WindowManager, client: Client, monitor: Monitor) =
   if client.minWidth > 0 and client.minWidth == client.maxWidth and
      client.minHeight > 0 and client.minHeight == client.maxHeight:
     autoFloat = true
-    client.width = max(client.width, client.minWidth.uint)
-    client.height = max(client.height, client.minHeight.uint)
   if autoFloat and not client.isFloating and not client.isFullscreen:
     if monitor != nil:
       monitor.setFloating(client, true)
     else:
       client.isFloating = true
-    client.centerIfAtOrigin(monitor)
+    # Hints often arrive after the window was already laid out as a tile, so
+    # drop the tile geometry: a fixed size window gets exactly its size, and
+    # every auto-floated window is centered.
+    if client.minWidth > 0 and client.minWidth == client.maxWidth and
+       client.minHeight > 0 and client.minHeight == client.maxHeight:
+      client.width = client.minWidth.uint
+      client.height = client.minHeight.uint
+    client.needsCenter = true
 
 proc applyRuleGeometry(client: Client, monitor: Monitor, rule: AppRule) =
   ## Position and size of a floating app rule. A position given by the rule is
