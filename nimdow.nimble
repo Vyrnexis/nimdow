@@ -29,3 +29,6 @@ task wlgen, "Regenerate Wayland protocol bindings from protocol/*.xml":
 
 task tinyrwm, "Build the tinyrwm River window manager example":
   exec "nim -o:bin/tinyrwm --hints:off c src/tinyrwm.nim"
+
+task e2e, "Run the end-to-end tests in a nested River (see tests/e2e/run.sh)":
+  exec "bash tests/e2e/run.sh -b"

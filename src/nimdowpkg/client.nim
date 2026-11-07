@@ -1,11 +1,14 @@
 import
   hashes,
-  sets
+  sets,
+  std/monotimes
 
 import
   area,
   taginfo,
   wl/protocols/river_window_management_v1
+
+export monotimes
 
 type
   PointerRequestKind* = enum
@@ -46,6 +49,10 @@ type
     closeRequested*: bool
     ## Last visibility sent to River.
     sentVisible*: bool
+    ## Last dimensions proposed to River (-1 = nothing proposed yet). Every
+    ## propose_dimensions makes River configure the window and wait for it,
+    ## so only re-propose when the size actually changes.
+    sentWidth*, sentHeight*: int
     # Window info reported by River.
     appId*: string
     title*: string
@@ -57,6 +64,16 @@ type
     hintsDirty*: bool
     ## Place the (floating) client in the middle of its monitor once its size is known.
     needsCenter*: bool
+    ## An app rule matched and was applied.
+    ruleApplied*: bool
+    ## The client was already held back one manage sequence waiting for its
+    ## app_id/title (see `assignUnassigned`).
+    deferredForInfo*: bool
+    ## When the client was first placed on a monitor (late title rules only
+    ## apply shortly after).
+    placedAt*: MonoTime
+    ## A (new, non-empty) title arrived since the last manage sequence.
+    titleChanged*: bool
     ## Requests made by the client, handled in the next manage sequence.
     fullscreenRequest*: FullscreenRequest
     pointerRequest*: PointerRequestKind
@@ -79,6 +96,8 @@ proc newClient*(window: Window, tagIDs: varargs[TagID]): Client =
     tagIDs: tagIDs.toHashSet(),
     isNew: true,
     sentVisible: true, # River considers new windows shown.
+    sentWidth: -1,
+    sentHeight: -1,
     hasBeenMapped: false
   )
 

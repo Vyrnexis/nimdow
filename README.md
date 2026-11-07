@@ -78,6 +78,15 @@ using `river-window-management-v1`. X11 is no longer supported.
   their exclusive zones shrink the tiled area and nimdow's own bar is placed below them.
 - The bar is rendered at the output's (fractional) scale.
 
+- Floating windows (rules, scratchpad, dialogs) are placed and clamped inside the usable area, i.e. the
+  output minus layer shell exclusive zones and nimdow's bar.
+- App rules are evaluated when a window is first placed; a window that has no `app_id` (or no title, if a rule
+  matches on titles) yet is held back for one manage sequence. If a title-based rule did not match and the
+  title arrives (or changes) within 500ms of the placement, the rules are evaluated again and apply the tags and
+  floating/fullscreen state (but never the monitor). `maximize_requested` is ignored.
+- Some clients ignore the size they are offered when they open floating. Alacritty (winit) is one: a
+  floating rule's `width`/`height` is sent, but alacritty opens at its own default size.
+
 Differences from the X11 version: no system tray, no urgency hints, and app rules match the
 window's `app_id` (`class` and `instance` both match it).
 
@@ -86,6 +95,9 @@ window's `app_id` (`class` and `instance` both match it).
 - Providing an alternative config file, e.g. `nimdow --config ./some-config.toml`
 - Version information: `nimdow -v` or `nimdow --version`
 - Setting the bar's status text of the running instance: `nimdow --status "text"`
+- Debug: `nimdow --dumpState [file]` makes the running instance write its state (monitors, tags, clients with
+  app_id/title/tags/floating/fullscreen/geometry, the focused client, bar visibility) as JSON to `file`
+  (default `$XDG_RUNTIME_DIR/nimdow-state.json`).
 
 ## Command Line Client <a name="cli-client"></a>
 
@@ -144,6 +156,16 @@ Nimdow is not (yet) included in this list.
 ## Roadmap
 
 See the [1.0 release project board](https://github.com/avahe-kellenberger/nimdow/projects/1)
+
+## End-to-end tests (Wayland) <a name="e2e"></a>
+
+`bash tests/e2e/run.sh [-o outdir] [-b] [-s scenario,...]` runs nimdow in a nested River (needs `river`, `grim`,
+`alacritty`, `jq` and a running Wayland session) with `tests/e2e/config.toml`. Input (key bindings, typing, pointer
+moves, clicks, super+drag, scrolling) is injected through the virtual keyboard/pointer protocols by
+`bin/nimdowinput` (`tests/e2e/nimdowinput.nim`, built by `-b` or on first use; `nimdowinput key super+shift+1`,
+`type "text"`, `move X Y`, `click left`, `drag super left X1 Y1 X2 Y2`, `scroll up`). Results are asserted
+through `nimdow --dumpState`; screenshots, the river/nimdow logs and `results.txt` end up in the output dir
+(default `./e2e-out`).
 
 ## Testing locally (for development) <a name="testing"></a>
 

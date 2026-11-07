@@ -38,6 +38,7 @@ type
     wmcRotateclients = "rotateclients"
     wmcToggleStatusBar = "togglestatusbar"
     wmcStatus = "status"
+    wmcDumpState = "dumpstate"
     wmcExitSession = "exitsession"
 
 proc parseCommand*(command: string): Option[WMCommand] =

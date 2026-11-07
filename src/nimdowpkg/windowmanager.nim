@@ -1,5 +1,5 @@
 import
-  std/[options, tables, sets, math, strutils, sequtils, os, algorithm, parseutils],
+  std/[options, json, times, tables, sets, math, strutils, sequtils, os, algorithm, parseutils],
   parsetoml
 
 import
@@ -376,21 +376,28 @@ proc popScratchpad(this: WindowManager) =
   let monitor = this.selectedMonitor
   let settings = this.config.scratchpadSettings
 
+  # Placed in the middle of the usable area (below the bar and layer surfaces).
+  let usable = monitor.usableArea()
   if not client.isFullscreen and not client.isFloating and not client.isFixedSize:
     client.borderWidth = this.config.windowSettings.borderWidth
+    let
+      width = clamp(settings.width, 1, max(usable.width.int - client.borderWidth.int * 2, 1))
+      height = clamp(settings.height, 1, max(usable.height.int - client.borderWidth.int * 2, 1))
     client.area = (
-      monitor.area.x + (monitor.area.width.int - settings.width) div 2,
-      monitor.area.y + (monitor.area.height.int - settings.height) div 2,
-      max(1, settings.width).uint,
-      max(1, settings.height).uint
+      usable.x + (usable.width.int - width - client.borderWidth.int * 2) div 2,
+      usable.y + (usable.height.int - height - client.borderWidth.int * 2) div 2,
+      width.uint,
+      height.uint
     )
     client.isFloating = true
   else:
     let
-      width = if client.width > 0: client.width.int else: client.reportedWidth
-      height = if client.height > 0: client.height.int else: client.reportedHeight
-    client.x = monitor.area.x + (monitor.area.width.int - width) div 2
-    client.y = monitor.area.y + (monitor.area.height.int - height) div 2
+      width = (if client.width > 0: client.width.int else: client.reportedWidth) +
+        client.borderWidth.int * 2
+      height = (if client.height > 0: client.height.int else: client.reportedHeight) +
+        client.borderWidth.int * 2
+    client.x = usable.x + (usable.width.int - width) div 2
+    client.y = usable.y + (usable.height.int - height) div 2
   client.needsCenter = false
   monitor.addClient(client)
   this.warpMonitor = monitor
@@ -417,6 +424,82 @@ proc jumpToUrgentWindow(this: WindowManager) =
         return
   log "jumpToUrgentWindow: no urgent windows (River has no urgency event, " &
     "so windows are never marked urgent)", lvlInfo
+
+proc clientJson(this: WindowManager, client: Client, focused: Client): JsonNode =
+  var tags: seq[int]
+  for id in client.tagIDs:
+    tags.add id.int
+  tags.sort()
+  %*{
+    "app_id": client.appId,
+    "title": client.title,
+    "tags": tags,
+    "floating": client.isFloating,
+    "fullscreen": client.isFullscreen,
+    "visible": client.isVisible,
+    "focused": client == focused,
+    "borderWidth": client.borderWidth.int,
+    "x": client.x,
+    "y": client.y,
+    "width": client.width.int,
+    "height": client.height.int,
+    "reportedWidth": client.reportedWidth,
+    "reportedHeight": client.reportedHeight
+  }
+
+proc dumpState*(this: WindowManager, path: string) =
+  ## Debug/test aid (`nimdow --dumpState [file]`): writes the window manager
+  ## state as JSON to `path` (default `$XDG_RUNTIME_DIR/nimdow-state.json`).
+  ## The file is written atomically.
+  var focused: Client
+  if this.selectedMonitor != nil:
+    focused = this.selectedMonitor.taggedClients.currClient
+  var monitors = newJArray()
+  for monitor in this.sortedMonitors():
+    var selectedTags: seq[int]
+    for id in monitor.selectedTags:
+      selectedTags.add id.int
+    selectedTags.sort()
+    var clients = newJArray()
+    for client in monitor.clients.items:
+      clients.add this.clientJson(client, focused)
+    monitors.add %*{
+      "id": monitor.id.int,
+      "selected": monitor == this.selectedMonitor,
+      "area": {
+        "x": monitor.area.x, "y": monitor.area.y,
+        "width": monitor.area.width.int, "height": monitor.area.height.int
+      },
+      "reserved": {
+        "top": monitor.reserved.top.int, "left": monitor.reserved.left.int,
+        "bottom": monitor.reserved.bottom.int, "right": monitor.reserved.right.int
+      },
+      "selectedTags": selectedTags,
+      "barVisible": monitor.statusBar != nil and monitor.isStatusBarEnabled,
+      "barHeight": monitor.barHeight.int,
+      "clients": clients
+    }
+  var scratch = newJArray()
+  for client in this.scratchpad:
+    scratch.add this.clientJson(client, focused)
+  var unassigned = newJArray()
+  for client in this.unassigned:
+    unassigned.add this.clientJson(client, focused)
+  let state = %*{
+    "monitors": monitors,
+    "scratchpad": scratch,
+    "unassigned": unassigned,
+    "focused": (if focused != nil: this.clientJson(focused, focused) else: newJNull())
+  }
+  let target =
+    if path.len > 0: path
+    else: getEnv("XDG_RUNTIME_DIR", "/tmp") / "nimdow-state.json"
+  try:
+    let tmp = target & ".tmp"
+    writeFile(tmp, $state)
+    moveFile(tmp, target)
+  except:
+    log "Failed to write the state to " & target & ": " & getCurrentExceptionMsg(), lvlError
 
 proc reloadConfig*(this: WindowManager) =
   let
@@ -564,6 +647,10 @@ proc mapConfigActions*(this: WindowManager) =
   createControl(keyCombo, $wmcToggleStatusBar):
     this.selectedMonitor.toggleStatusBar()
 
+  # The key is the output file (see `dumpState`).
+  createControl(keyCombo, $wmcDumpState):
+    this.dumpState(keyCombo.key)
+
   # Ends the whole River session (killing nimdow alone leaves River running).
   createControl(keyCombo, $wmcExitSession):
     river_window_manager_v1_exit_session(this.manager)
@@ -584,7 +671,11 @@ proc windowAppId(data: pointer, obj: RiverWindowV1, appId: cstring) {.cdecl.} =
   cast[Client](data).appId = if appId.isNil: "" else: $appId
 
 proc windowTitle(data: pointer, obj: RiverWindowV1, title: cstring) {.cdecl.} =
-  cast[Client](data).title = if title.isNil: "" else: $title
+  let client = cast[Client](data)
+  let newTitle = if title.isNil: "" else: $title
+  if newTitle.len > 0 and newTitle != client.title:
+    client.titleChanged = true
+  client.title = newTitle
 
 proc windowDimensionsHint(
   data: pointer, obj: RiverWindowV1, minWidth, minHeight, maxWidth, maxHeight: int32
@@ -624,8 +715,9 @@ proc windowPointerResizeRequested(
   client.pointerRequestSeat = seat
   client.pointerRequestEdges = edges
 
-# maximize_requested/unmaximize_requested are ignored: tiled windows stay
-# tiled and nimdow never tells a window that it is maximized.
+# maximize_requested/unmaximize_requested are ignored, which the protocol
+# allows ("free to honor or ignore"): tiled windows stay tiled and nimdow never
+# tells a window that it is maximized, so no inform_(un)maximized reply is due.
 var windowListener = river_window_v1_noop_listener()
 windowListener.closed = windowClosed
 windowListener.dimensions = windowDimensions
@@ -821,8 +913,9 @@ proc findAppRule(this: WindowManager, client: Client): AppRule =
 
 proc centerIfAtOrigin(client: Client, monitor: Monitor) =
   ## Original centerClientIfNeeded: a floating client at the top-left corner
-  ## of the monitor is centered once its size is known.
-  if client.x <= monitor.area.x and client.y <= monitor.area.y:
+  ## of the usable area is centered once its size is known.
+  let usable = monitor.usableArea()
+  if client.x <= usable.x and client.y <= usable.y:
     client.needsCenter = true
 
 proc applyHints(this: WindowManager, client: Client, monitor: Monitor) =
@@ -841,20 +934,90 @@ proc applyHints(this: WindowManager, client: Client, monitor: Monitor) =
       client.isFloating = true
     client.centerIfAtOrigin(monitor)
 
+proc applyRuleGeometry(client: Client, monitor: Monitor, rule: AppRule) =
+  ## Position and size of a floating app rule. A position given by the rule is
+  ## kept inside the usable area; without one the client is centered later.
+  if rule.width > 0: client.width = rule.width.uint
+  if rule.height > 0: client.height = rule.height.uint
+  let usable = monitor.usableArea()
+  if rule.x >= 0:
+    let maxX =
+      if client.width > 0: usable.x + usable.width.int - client.totalWidth
+      else: usable.x + usable.width.int - 1
+    client.x = clamp(monitor.area.x + rule.x, usable.x, max(usable.x, maxX))
+  if rule.y >= 0:
+    let maxY =
+      if client.height > 0: usable.y + usable.height.int - client.totalHeight
+      else: usable.y + usable.height.int - 1
+    client.y = clamp(monitor.area.y + rule.y, usable.y, max(usable.y, maxY))
+
+const
+  ## Title rules are re-evaluated when the title arrives within this time of
+  ## the window having been placed (see `applyLateRules`).
+  LateRuleWindow = initDuration(milliseconds = 500)
+
+proc hasTitleRules(this: WindowManager): bool =
+  for rule in this.config.appRules:
+    if rule.title.len > 0:
+      return true
+
+proc applyLateRules(this: WindowManager, client: Client, monitor: Monitor) =
+  ## Windows often set their title only after they were mapped, so a title-based
+  ## rule can miss the first evaluation. When the first title arrives shortly
+  ## after placement and no rule has matched yet, the rules run again. Only the
+  ## tags and the floating/fullscreen state apply late (the window stays on its
+  ## monitor).
+  client.titleChanged = false
+  if client.ruleApplied or getMonoTime() - client.placedAt > LateRuleWindow:
+    return
+  let rule = this.findAppRule(client)
+  if rule == nil:
+    return
+  client.ruleApplied = true
+  log "Applied app rule to \"" & client.appId & "\" after its title arrived: " & client.title
+  if rule.tagIDs.len > 0:
+    client.tagIDs.clear()
+    for tagID in rule.tagIDs:
+      client.tagIDs.incl tagID
+  case rule.state
+  of wsFloating:
+    monitor.setFloating(client, true)
+    applyRuleGeometry(client, monitor, rule)
+    client.centerIfAtOrigin(monitor)
+  of wsFullscreen:
+    monitor.setFullscreen(client, true)
+  of wsNormal:
+    discard
+  monitor.doLayout()
+
 proc assignUnassigned(this: WindowManager) =
   ## Puts clients on a monitor (kept waiting if there is none yet): new clients
   ## by their app rule or on the selected monitor (which follows the pointer),
   ## clients of removed outputs on the selected monitor.
+  ##
+  ## A new client is held back for one manage sequence while its app_id (or its
+  ## title, if any rule matches on titles) is still unknown, so rules see them.
   if this.selectedMonitor == nil:
     return
-  let monitors = this.sortedMonitors()
+  let
+    monitors = this.sortedMonitors()
+    titleRules = this.hasTitleRules()
+  var waiting: seq[Client]
   for client in this.unassigned:
     var
       c = client
       monitor = this.selectedMonitor
       rule: AppRule
     if client.isNew:
+      if not client.deferredForInfo and not client.isClosed and
+         (client.appId.len == 0 or (titleRules and client.title.len == 0)):
+        client.deferredForInfo = true
+        waiting.add client
+        continue
       rule = this.findAppRule(client)
+      client.titleChanged = false
+      client.ruleApplied = rule != nil
+      client.placedAt = getMonoTime()
       client.borderWidth = this.config.windowSettings.borderWidth
       if rule != nil and rule.monitorID in 1 .. monitors.len:
         monitor = monitors[rule.monitorID - 1]
@@ -868,10 +1031,7 @@ proc assignUnassigned(this: WindowManager) =
         case rule.state
         of wsFloating:
           client.isFloating = true
-          if rule.x >= 0: client.x = monitor.area.x + rule.x
-          if rule.y >= 0: client.y = monitor.area.y + rule.y
-          if rule.width > 0: client.width = rule.width.uint
-          if rule.height > 0: client.height = rule.height.uint
+          applyRuleGeometry(client, monitor, rule)
         of wsFullscreen:
           client.isFullscreen = true
         of wsNormal:
@@ -886,7 +1046,10 @@ proc assignUnassigned(this: WindowManager) =
         monitor.doLayout()
     else:
       monitor.addClient(c)
-  this.unassigned.setLen 0
+  this.unassigned = waiting
+  if waiting.len > 0:
+    # Nothing else may be going on: have River start another manage sequence.
+    this.markDirty()
 
 # ---------------------------------------------------------------------------
 # Seats and key bindings
@@ -1197,10 +1360,19 @@ proc applyManageState(this: WindowManager) =
         client.sentFullscreenOutput = nil
 
       # Floating clients without a size yet (0) let the window choose.
-      if client.isVisible and not client.isFullscreen:
+      # New windows always get a proposal, even when hidden (e.g. ruled onto
+      # another tag): it is their initial configure, without which they never
+      # map. After that, only propose when the size changes.
+      if client.isFullscreen:
+        client.sentWidth = -1
+        client.sentHeight = -1
+      elif client.isNew or (client.isVisible and
+          (client.width.int != client.sentWidth or client.height.int != client.sentHeight)):
         river_window_v1_propose_dimensions(
           client.window, client.width.int32, client.height.int32
         )
+        client.sentWidth = client.width.int
+        client.sentHeight = client.height.int
 
       if client.isNew:
         # nimdow draws its own borders; ask clients not to draw title bars.
@@ -1296,6 +1468,8 @@ proc onManageStart(this: WindowManager) =
     let monitor = this.monitorOf(client)
     if monitor == nil:
       continue
+    if client.titleChanged:
+      this.applyLateRules(client, monitor)
     if client.hintsDirty:
       this.applyHints(client, monitor)
     case client.fullscreenRequest
@@ -1358,12 +1532,12 @@ proc colorChannel(value: int, shift: int): uint32 =
 
 proc centerOnMonitor(client: Client, monitor: Monitor) =
   ## Centers a floating client whose size is known (the size it was given, or
-  ## what the window chose).
+  ## what the window chose) in the monitor's usable area.
   if client.width == 0: client.width = max(client.reportedWidth, 0).uint
   if client.height == 0: client.height = max(client.reportedHeight, 0).uint
   if client.width == 0 or client.height == 0:
     return
-  let area = monitor.area
+  let area = monitor.usableArea()
   client.x = (area.x.float + (area.width.float - client.totalWidth.float) / 2).int
   client.y = (area.y.float + (area.height.float - client.totalHeight.float) / 2).int
   client.needsCenter = false

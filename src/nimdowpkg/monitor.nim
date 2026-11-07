@@ -101,6 +101,15 @@ proc calcLayoutOffset(this: Monitor): LayoutOffset =
     this.reserved.right
   )
 
+proc usableArea*(this: Monitor): Area =
+  ## The monitor's area without the space taken by layer shell surfaces and
+  ## nimdow's own bar. Floating windows are placed and clamped inside it.
+  let
+    o = this.layoutOffset
+    width = max(this.area.width.int - o.left.int - o.right.int, 1)
+    height = max(this.area.height.int - o.top.int - o.bottom.int, 1)
+  (this.area.x + o.left.int, this.area.y + o.top.int, width.uint, height.uint)
+
 proc updateMonitor*(this: Monitor) =
   ## Recomputes the layout offset (bar space) and relayouts, e.g. after the
   ## output geometry changed.
@@ -415,10 +424,9 @@ proc setFloating*(this: Monitor, client: Client, floating: bool) =
       client.oldBorderWidth = 0
       client.borderWidth = this.windowSettings.borderWidth
     let
-      maxWidth = this.area.width.int - this.layoutOffset.left.int -
-        this.layoutOffset.right.int - client.borderWidth.int * 2
-      maxHeight = this.area.height.int - this.layoutOffset.top.int -
-        this.layoutOffset.bottom.int - client.borderWidth.int * 2
+      usable = this.usableArea()
+      maxWidth = usable.width.int - client.borderWidth.int * 2
+      maxHeight = usable.height.int - client.borderWidth.int * 2
     if client.width.int > maxWidth and maxWidth > 0:
       client.width = maxWidth.uint
     if client.height.int > maxHeight and maxHeight > 0:

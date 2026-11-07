@@ -72,6 +72,10 @@ proc handleCommandLineParams*(): bool =
         if p.val.len > 0:
           strArr.add p.val
 
+  # The running instance has another working directory: send an absolute path.
+  if strArr.len > 1 and strArr[0].toLowerAscii == "dumpstate":
+    strArr[1] = absolutePath(strArr[1])
+
   let commandStr = strArr.join(" ")
   try:
     # Ensure the first param is a valid command.
