@@ -1,17 +1,15 @@
 import
   os,
-  osproc,
   parsetoml,
   strutils,
-  tables,
-  x11 / [x,  xlib]
+  tables
 
 import
   apprules,
   tagsettings,
   ../point,
   ../keys/keyutils,
-  ../event/xeventmanager,
+  ../spawn,
   ../logger,
   ../windowtitleposition,
   ../wmcommands
@@ -28,7 +26,9 @@ proc findConfigPath*(): string =
     result = ""
 
 type
-  KeyCombo* = tuple[keycode: int, modifiers: int]
+  KeyCombo* = tuple[key: string, modifiers: uint32]
+    ## `key` is an xkbcommon key name ("Return", "i", "1", ...). For tag actions it
+    ## doubles as the argument (the tag number); IPC passes the argument as `key`.
   Action* = proc(keyCombo: KeyCombo): void
   RegionClickAction* = proc(idx: int, width: int, regionCord: Point[int], clickCord: Point[int], button: int): void
 
@@ -62,13 +62,11 @@ type
 
   MonitorID* = int
   Config* = ref object
-    eventManager: XEventManager
     actionIdentifierTable*: Table[string, Action]
     keyComboTable*: Table[KeyCombo, Action]
     regionClickActionTable*: Table[int, RegionClickAction]
     windowSettings*: WindowSettings
     scratchpadSettings*: ScratchpadSettings
-    xEventListener*: XEventListener
     loggingEnabled*: bool
     reverseTagScrolling*: bool
     tagKeys*: seq[string]
@@ -77,9 +75,8 @@ type
     monitorSettings*: Table[MonitorID, MonitorSettings]
     appRules*: seq[AppRule]
 
-proc newConfig*(eventManager: XEventManager): Config =
+proc newConfig*(): Config =
   Config(
-    eventManager: eventManager,
     actionIdentifierTable: initTable[string, Action](),
     keyComboTable: initTable[KeyCombo, Action](),
     windowSettings: WindowSettings(
@@ -88,7 +85,7 @@ proc newConfig*(eventManager: XEventManager): Config =
       borderColorFocused: 0x519f50,
       borderColorUrgent: 0xff5555,
       borderWidth: 1,
-      modKey: ModifierTable["super"]
+      modKey: ModifierTable["super"].int
     ),
     scratchpadSettings: ScratchpadSettings(
       width: 500,
@@ -100,22 +97,19 @@ proc newConfig*(eventManager: XEventManager): Config =
   )
 
 proc configureAction*(this: Config, actionName: string, actionInvokee: Action)
-proc hookConfig*(this: Config)
 proc populateBarSettings*(this: Config, barSettings: var BarSettings, settingsTable: TomlTableRef)
 proc populateLayoutSettings*(this: Config, layoutSettings: var LayoutSettings, settingsTable: TomlTableRef)
-proc populateControlAction(this: Config, display: PDisplay, action: string, configTable: TomlTable)
-proc populateKeyComboTable*(this: Config, configTable: TomlTable, display: PDisplay)
+proc populateControlAction(this: Config, action: string, configTable: TomlTable)
+proc populateKeyComboTable*(this: Config, configTable: TomlTable)
 proc getKeyCombos(
   this: Config,
   configTable: TomlTable,
-  display: PDisplay,
   action: string,
   keys: seq[string]
 ): seq[KeyCombo]
 proc getKeyCombos(
   this: Config,
   configTable: TomlTable,
-  display: PDisplay,
   action: string
 ): seq[KeyCombo]
 proc getKeysForAction(this: Config, configTable: TomlTable, action: string): seq[string]
@@ -144,10 +138,7 @@ proc getAutostartCommands(this: Config, configTable: TomlTable): seq[string] =
       log repr(cmd) & " is not a string", lvlWarn
 
 proc runCommand(this: Config, cmd: string) =
-  try:
-    let process = startProcess(command = cmd, options = { poEvalCommand })
-    this.eventManager.submitProcess(process)
-  except:
+  if not spawnShell(cmd):
     log "Failed to start command: " & cmd, lvlWarn
 
 proc runCommands(this: Config, commands: varargs[string]) =
@@ -163,7 +154,7 @@ proc runCommandWithArgs(this: Config, command: string, arguments: varargs[string
 proc populateAppRules*(this: Config, configTable: TomlTable) =
   this.appRules = configTable.parseAppRules()
 
-proc getModifierMask(modifier: TomlValueRef): int =
+proc getModifierMask(modifier: TomlValueRef): uint32 =
   if modifier.kind != TomlValueKind.String:
     log "Invalid key configuration: " & repr(modifier) & " is not a string", lvlError
     return
@@ -174,7 +165,7 @@ proc getModifierMask(modifier: TomlValueRef): int =
 
   return ModifierTable[modifier.stringVal]
 
-proc bitorModifiers(modifiers: openarray[TomlValueRef]): int =
+proc bitorModifiers(modifiers: openarray[TomlValueRef]): uint32 =
   for tomlElement in modifiers:
     result = result or getModifierMask(tomlElement)
 
@@ -186,15 +177,7 @@ proc configureExternalProcess(this: Config, command: string) =
     proc(keyCombo: KeyCombo) =
       this.runCommands(command)
 
-proc hookConfig*(this: Config) =
-  this.xEventListener = proc(e: XEvent) =
-    let mask: int = cleanMask(int(e.xkey.state))
-    let keyCombo: KeyCombo = (int(e.xkey.keycode), mask)
-    if this.keyComboTable.hasKey(keyCombo):
-      this.keyComboTable[keyCombo](keyCombo)
-  this.eventManager.addListener(this.xEventListener, KeyPress)
-
-proc populateDefaultMonitorSettings(this: Config, display: PDisplay) =
+proc populateDefaultMonitorSettings(this: Config) =
   this.defaultMonitorSettings = MonitorSettings()
 
   this.defaultMonitorSettings.barSettings = BarSettings(
@@ -220,8 +203,8 @@ proc populateDefaultMonitorSettings(this: Config, display: PDisplay) =
 
   this.defaultMonitorSettings.tagSettings = createDefaultTagSettings()
 
-proc populateMonitorSettings(this: Config, configTable: TomlTable, display: PDisplay) =
-  this.populateDefaultMonitorSettings(display)
+proc populateMonitorSettings(this: Config, configTable: TomlTable) =
+  this.populateDefaultMonitorSettings()
 
   if not configTable.hasKey("monitors"):
     return
@@ -240,7 +223,7 @@ proc populateMonitorSettings(this: Config, configTable: TomlTable, display: PDis
     if changedDefaults.hasKey("tags"):
       let tagsTable = changedDefaults["tags"]
       if tagsTable.kind == TomlValueKind.Table:
-        # this.defaultMonitorSettings.populateTagSettings(tagsTable.tableVal, display)
+        # this.defaultMonitorSettings.populateTagSettings(tagsTable.tableVal)
         this.defaultMonitorSettings.tagSettings.populateTagSettings(tagsTable.tableVal)
 
   # Populate settings per-monitor
@@ -269,7 +252,7 @@ proc populateMonitorSettings(this: Config, configTable: TomlTable, display: PDis
 
     this.monitorSettings[monitorID] = monitorSettings
 
-proc populateControlsTable(this: Config, configTable: TomlTable, display: PDisplay) =
+proc populateControlsTable(this: Config, configTable: TomlTable) =
   if not configTable.hasKey("controls"):
     return
   # Populate window manager controls
@@ -280,11 +263,11 @@ proc populateControlsTable(this: Config, configTable: TomlTable, display: PDispl
   for action in controlsTable.tableVal.keys():
     let commandOpt = parseCommand(action)
     if commandOpt.isSome:
-      this.populateControlAction(display, ($(commandOpt.get)).toLower(), controlsTable[action].tableVal[])
+      this.populateControlAction(($(commandOpt.get)).toLower(), controlsTable[action].tableVal[])
     else:
       log "Invalid control: " & action, lvlError
 
-proc populateExternalProcessSettings(this: Config, configTable: TomlTable, display: PDisplay) =
+proc populateExternalProcessSettings(this: Config, configTable: TomlTable) =
   if not configTable.hasKey("startProcess"):
     return
 
@@ -326,7 +309,6 @@ proc populateExternalProcessSettings(this: Config, configTable: TomlTable, displ
     else:
       this.configureExternalProcess(command)
       this.populateControlAction(
-        display,
         command,
         commandDeclaration.tableVal[]
       )
@@ -503,15 +485,15 @@ proc populateGeneralSettings*(this: Config, configTable: TomlTable) =
   if settingsTable.hasKey("modKey"):
     let modKeySettings = settingsTable["modKey"]
     if modKeySettings.kind == TomlValueKind.String:
-      this.windowSettings.modKey = ModifierTable[modKeySettings.stringVal]
+      this.windowSettings.modKey = ModifierTable[modKeySettings.stringVal].int
     else:
       log "modKey is not a string value!", lvlWarn
 
-proc populateKeyComboTable*(this: Config, configTable: TomlTable, display: PDisplay) =
+proc populateKeyComboTable*(this: Config, configTable: TomlTable) =
   ## Reads the user's configuration file and set the keybindings.
-  this.populateControlsTable(configTable, display)
-  this.populateMonitorSettings(configTable, display)
-  this.populateExternalProcessSettings(configTable, display)
+  this.populateControlsTable(configTable)
+  this.populateMonitorSettings(configTable)
+  this.populateExternalProcessSettings(configTable)
 
 proc loadConfigFile*(): TomlTable =
   ## Reads the user's configuration file into a table.
@@ -524,8 +506,8 @@ proc loadConfigFile*(): TomlTable =
     raise newException(Exception, "Invalid config file!")
   return loadedConfig.tableVal[]
 
-proc populateControlAction(this: Config, display: PDisplay, action: string, configTable: TomlTable) =
-  let keyCombos = this.getKeyCombos(configTable, display, action)
+proc populateControlAction(this: Config, action: string, configTable: TomlTable) =
+  let keyCombos = this.getKeyCombos(configTable, action)
   for keyCombo in keyCombos:
     if this.actionIdentifierTable.hasKey(action):
       this.keyComboTable[keyCombo] = this.actionIdentifierTable[action]
@@ -535,26 +517,25 @@ proc populateControlAction(this: Config, display: PDisplay, action: string, conf
 proc getKeyCombos(
   this: Config,
   configTable: TomlTable,
-  display: PDisplay,
   action: string,
   keys: seq[string]
 ): seq[KeyCombo] =
   ## Gets the KeyCombos associated with the given `action` from the table.
   let modifierArray = this.getModifiersForAction(configTable, action)
-  let modifiers: int = bitorModifiers(modifierArray)
+  let modifiers: uint32 = bitorModifiers(modifierArray)
   for key in keys:
-    let keycode = key.toKeycode(display)
-    result.add((keycode, cleanMask(modifiers)))
+    if key.toKeysym() == NoSymbol:
+      log "Unknown key name in config: \"" & key & "\" (action \"" & action & "\")", lvlError
+      continue
+    result.add((key, modifiers))
 
 proc getKeyCombos(
   this: Config,
   configTable: TomlTable,
-  display: PDisplay,
   action: string
 ): seq[KeyCombo] =
   return this.getKeyCombos(
     configTable,
-    display,
     action,
     this.getKeysForAction(configTable, action)
   )

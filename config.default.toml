@@ -1,31 +1,27 @@
 # App Rules
 # Example:
 # [[appRule]]
-# class = "st"
-# instance = "st"
-# title = "st"
+# class = "foot"   # matched against the window's app_id
+# title = "foot"
 # monitor = 1
 # tags = [ 1, 4, 7 ]
 # state = "floating" # normal, floating, and fullscreen are all valid.
 
 # Start external programs
 [[startProcess]]
-command = "pkill nimdow"
-keys = [ "Delete" ]
-modifiers = [ "control", "alt" ]
-
-[[startProcess]]
 command = "$BROWSER"
 keys = [ "i" ]
 modifiers = [ "super" ]
 
+# Application launcher, any Wayland launcher works (fuzzel, wofi, tofi, ...).
 [[startProcess]]
-command = "dmenu_run"
+command = "fuzzel"
 keys = [ "p" ]
 modifiers = [ "super" ]
 
+# Terminal
 [[startProcess]]
-command = "st"
+command = "alacritty"
 keys = [ "Return" ]
 modifiers = [ "super" ]
 
@@ -34,11 +30,13 @@ modifiers = [ "super" ]
 # command = "notify-send \"Id: %1, rx: %2, cx: %4, cy: %5, w: %6, b: %7\""
 # clickRegion = 0
 
+# The status text on the bar is set with `nimdow --status "text"`, e.g. from a script:
+#   while true; do nimdow --status "$(date +%H:%M)"; sleep 30; done
 [autostart]
 exec = [
-  "xsetroot -cursor_name left_ptr",
   #"firefox",
-  #"st",
+  #"alacritty",
+  #"while true; do nimdow --status \"$(date +%H:%M)\"; sleep 30; done",
 ]
 
 [settings]
@@ -199,6 +197,11 @@ exec = [
   [controls.rotateClients]
   keys = [ "r" ]
   modifiers = [ "super" ]
+
+  [controls.exitSession]
+  # Exits River (and nimdow). Killing nimdow alone leaves River running.
+  keys = [ "Delete" ]
+  modifiers = [ "control", "alt" ]
 
   [controls.toggleStatusBar]
   keys = [ "b" ]

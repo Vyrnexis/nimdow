@@ -37,6 +37,8 @@ type
     wmcPopScratchpad = "popscratchpad"
     wmcRotateclients = "rotateclients"
     wmcToggleStatusBar = "togglestatusbar"
+    wmcStatus = "status"
+    wmcExitSession = "exitsession"
 
 proc parseCommand*(command: string): Option[WMCommand] =
   try:

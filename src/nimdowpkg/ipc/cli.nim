@@ -66,7 +66,8 @@ proc handleCommandLineParams*(): bool =
     case p.kind:
       of cmdEnd: break
       of cmdShortOption, cmdLongOption, cmdArgument:
-        let option = p.key.replace("-")
+        # Only options carry leading dashes; arguments (paths, tag numbers) are kept as is.
+        let option = if p.kind == cmdArgument: p.key else: p.key.replace("-")
         strArr.add option
         if p.val.len > 0:
           strArr.add p.val

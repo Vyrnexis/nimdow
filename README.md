@@ -17,13 +17,13 @@ I am using this project to learn Nim, x11, and to replace my build of **dwm** (w
     1. [Building from source](#building)
     2. [Arch Linux (AUR)](#aur)
 3. [Config File](#config)
-4. [Command Line Arguments](#cli)
-5. [Command Line Client](#cli-client)
-6. [Status Bar](#statusbar)
-7. [Issues with Java Applications](#issues-with-java-applications)
-8. [Roadmap](#roadmap)
-9. [Testing Locally](#testing)
-
+4. [Wayland / River](#wayland)
+5. [Command Line Arguments](#cli)
+6. [Command Line Client](#cli-client)
+7. [Status Bar](#statusbar)
+8. [Issues with Java Applications](#issues-with-java-applications)
+9. [Roadmap](#roadmap)
+10. [Testing Locally](#testing)
 
 ## Screenshots
 
@@ -64,10 +64,28 @@ If no config file is found, Nimdow will not launch.
 
 **See [the wiki](https://github.com/avahe-kellenberger/nimdow/wiki/User-Configuration-File) for information about the specifics of the config file.**
 
+## Wayland / River <a name="wayland"></a>
+
+This branch is a [River](https://codeberg.org/river/river) (0.5 or newer) window manager client
+using `river-window-management-v1`. X11 is no longer supported.
+
+- Build dependencies: `wayland`, `xkbcommon`, `cairo`, `pango`, `river >= 0.5` (plus `nim` and `nimble`).
+- Run with `river -c nimdow`. For a login manager, install `wayland-sessions/nimdow.desktop`
+  to `/usr/share/wayland-sessions/`.
+- The status text is set with `nimdow --status "text"`, for example:
+  `while true; do nimdow --status "$(date +%H:%M)"; sleep 30; done`
+- Layer shell clients (launchers, notifications, wallpapers, other bars such as noctalia) are supported;
+  their exclusive zones shrink the tiled area and nimdow's own bar is placed below them.
+- The bar is rendered at the output's (fractional) scale.
+
+Differences from the X11 version: no system tray, no urgency hints, and app rules match the
+window's `app_id` (`class` and `instance` both match it).
+
 ## Command Line Arguments <a name="cli"></a>
 
 - Providing an alternative config file, e.g. `nimdow --config ./some-config.toml`
 - Version information: `nimdow -v` or `nimdow --version`
+- Setting the bar's status text of the running instance: `nimdow --status "text"`
 
 ## Command Line Client <a name="cli-client"></a>
 

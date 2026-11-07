@@ -1,25 +1,34 @@
 import
-  x11 / [x, xlib, xutil],
-  area,
-  taginfo,
-  xatoms
-
-import
   hashes,
   sets
 
-converter intToCint(x: int): cint = x.cint
-converter uintToCint(x: uint): cint = x.cint
-converter toXBool(x: bool): XBool = x.XBool
+import
+  area,
+  taginfo,
+  wl/protocols/river_window_management_v1
 
 type
+  PointerRequestKind* = enum
+    prNone, prMove, prResize
+
+  FullscreenRequest* = enum
+    frNone, frEnter, frExit
+
+  Window* = RiverWindowV1
+  ## The river window handle is what identifies a client.
+
   Client* = ref object of RootObj
     window*: Window
+    node*: RiverNodeV1
     tagIDs*: HashSet[TagID]
+    # Desired state. Event handlers and actions only change these fields;
+    # they are flushed to River during the next manage/render sequence.
     area*: Area
     oldArea*: Area
     borderWidth*: uint
     oldBorderWidth*: uint
+    ## Desired visibility (the monitor's selected tags contain one of our tags).
+    isVisible*: bool
     isFullscreen*: bool
     isFloating*: bool
     oldFloatingState*: bool
@@ -28,6 +37,37 @@ type
     needsResize*: bool
     needsFullscreen*: bool
     isUrgent*: bool
+    # Bookkeeping for the pending-state flush.
+    ## No state has been sent to River for this client yet.
+    isNew*: bool
+    ## River told us the window is gone; destroyed at the next manage sequence.
+    isClosed*: bool
+    ## close() must be sent during the next manage sequence.
+    closeRequested*: bool
+    ## Last visibility sent to River.
+    sentVisible*: bool
+    # Window info reported by River.
+    appId*: string
+    title*: string
+    ## The window has a parent (dialog/transient); it floats.
+    hasParent*: bool
+    ## Preferred min/max size (river_window_v1.dimensions_hint); 0 = no preference.
+    minWidth*, minHeight*, maxWidth*, maxHeight*: int
+    ## parent/dimensions_hint changed; re-evaluated in the next manage sequence.
+    hintsDirty*: bool
+    ## Place the (floating) client in the middle of its monitor once its size is known.
+    needsCenter*: bool
+    ## Requests made by the client, handled in the next manage sequence.
+    fullscreenRequest*: FullscreenRequest
+    pointerRequest*: PointerRequestKind
+    pointerRequestSeat*: RiverSeatV1
+    pointerRequestEdges*: uint32
+    # What was last sent to River.
+    sentFullscreen*: bool
+    sentFullscreenOutput*: RiverOutputV1
+    sentTiled*: bool
+    ## Dimensions the window actually took (river_window_v1.dimensions).
+    reportedWidth*, reportedHeight*: int
     # Clients start as unmapped; this property signifies if it was ever mapped.
     hasBeenMapped*: bool
 
@@ -37,6 +77,8 @@ proc newClient*(window: Window, tagIDs: varargs[TagID]): Client =
   Client(
     window: window,
     tagIDs: tagIDs.toHashSet(),
+    isNew: true,
+    sentVisible: true, # River considers new windows shown.
     hasBeenMapped: false
   )
 
@@ -60,143 +102,22 @@ proc `oldwidth=`*(this: Client, width: uint) {.inline.} = this.oldArea.width = w
 proc oldHeight*(this: Client): uint = this.oldArea.height
 proc `oldheight=`*(this: Client, height: uint) {.inline.} = this.oldArea.height = height
 
-proc totalWidth*(this: Client): int {.inline.} = this.width + this.borderWidth.int * 2
-proc totalHeight*(this: Client): int {.inline.} = this.height + this.borderWidth.int * 2
+proc totalWidth*(this: Client): int {.inline.} = this.width.int + this.borderWidth.int * 2
+proc totalHeight*(this: Client): int {.inline.} = this.height.int + this.borderWidth.int * 2
 
-proc configure*(this: Client, display: PDisplay) =
-  var event: XConfigureEvent
-  event.theType = ConfigureNotify
-  event.display = display
-  event.event = this.window
-  event.window = this.window
-  event.x = this.x
-  event.y = this.y
-  event.width = this.width
-  event.height = this.height
-  event.border_width = this.borderWidth
-  event.above = None
-  event.override_redirect = false
-  discard XSendEvent(
-    display,
-    this.window,
-    false,
-    StructureNotifyMask,
-    cast[PXEvent](event.addr)
-  )
+proc resize*(this: Client, x, y: int, width, height: uint) =
+  ## Records the desired area (excluding border); applied on the next manage/render.
+  this.oldArea = this.area
+  this.area = (x, y, width, height)
 
-proc adjustToState*(this: Client, display: PDisplay) =
-  ## Changes the client's location, size, and border based on the client's internal state.
-  discard XSetWindowBorderWidth(display, this.window, this.borderWidth.cuint)
-
-  var windowChanges: XWindowChanges
-  windowChanges.x = this.x
-  windowChanges.y = this.y
-  windowChanges.width = this.width
-  windowChanges.height = this.height
-  windowChanges.border_width = this.borderWidth.cint
-  discard XConfigureWindow(
-    display,
-    this.window,
-    CWX or CWY or CWWidth or CWHeight or CWBorderWidth,
-    windowChanges.addr
-  )
-  this.configure(display)
-  discard XSync(display, false)
-
-proc resize*(this: Client, display: PDisplay, x, y: int, width, height: uint) =
-  ## Resizes and raises the client.
+proc setLocation*(this: Client, x, y: int) =
   this.oldX = this.x
   this.x = x
-
   this.oldY = this.y
   this.y = y
 
-  this.oldWidth = this.width
-  this.width = width
-
-  this.oldHeight = this.height
-  this.height = height
-
-  this.adjustToState(display)
-
-proc setLocation*(this: Client, display: PDisplay, x, y: int) =
-  this.oldX = this.x
-  this.x = x
-
-  this.oldY = this.y
-  this.y = y
-
-  this.adjustToState(display)
-
-proc show*(this: Client, display: PDisplay) =
-  ## Moves the client to its current geom.
-  if this.needsResize:
-    this.needsResize = false
-    discard XMoveResizeWindow(
-      display,
-      this.window,
-      this.x,
-      this.y,
-      this.width.cuint,
-      this.height.cuint
-    )
-  else:
-    discard XMoveWindow(
-      display,
-      this.window,
-      this.x,
-      this.y
-    )
-
-proc hide*(this: Client, display: PDisplay) =
-  ## Moves the client off screen.
-  discard XMoveWindow(
-    display,
-    this.window,
-    (this.width.int + this.borderWidth.int * 2) * -2,
-    this.y
-  )
-
-proc takeFocus*(this: Client, display: PDisplay) =
-  discard display.sendEvent(
-    this.window,
-    $WMTakeFocus,
-    NoEventMask,
-    ($WMTakeFocus).clong,
-    CurrentTime,
-    0, 0, 0
-  )
-
-proc setUrgent*(this: Client, display: PDisplay, isUrgent: bool) =
+proc setUrgent*(this: Client, isUrgent: bool) =
   this.isUrgent = isUrgent
-
-  var hints: PXWMHints = XGetWMHints(display, this.window)
-  if hints == nil:
-    hints = XAllocWMHints()
-    if hints == nil:
-      return
-
-  if isUrgent:
-    hints.flags = hints.flags or XUrgencyHint
-  else:
-    hints.flags = hints.flags and (not XUrgencyHint)
-
-  discard XSetWMHints(display, this.window, hints)
-  discard XFree(hints)
-
-proc warpTo*(display: PDisplay, client: Client) =
-  discard XWarpPointer(
-    display,
-    x.None,
-    client.window,
-    0,
-    0,
-    0,
-    0,
-    client.width.int div 2,
-    client.height.int div 2
-  )
-  discard XSetInputFocus(display, client.window, RevertToNone, CurrentTime)
 
 proc isNormal*(this: Client): bool =
   ## If the client is "normal".
@@ -263,5 +184,5 @@ proc findPreviousTiled*(clients: openArray[Client], i: int = 0): int =
       client.isNormal and not client.isFloating and not client.isFullscreen
   )
 
-proc hash*(this: Client): Hash = !$Hash(this.window)
+proc hash*(this: Client): Hash = !$hash(cast[int](this.window))
 

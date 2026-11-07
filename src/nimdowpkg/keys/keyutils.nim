@@ -1,47 +1,42 @@
 import
-  x11 / [x, xlib, keysym],
+  strutils,
   tables
 
-converter toInt(x: KeyCode): int = x.int
+import ../wl/protocols/river_window_management_v1
 
-## A table of key modifier names to their respective masks.
+## Key helpers for River's xkb bindings (xkbcommon keysyms).
+
+type Keysym* = uint32
+
+const NoSymbol* = 0'u32
+
+proc xkb_keysym_from_name(name: cstring, flags: cint): uint32 {.
+  importc, cdecl, header: "<xkbcommon/xkbcommon.h>".}
+
+## A table of key modifier names to their respective River modifier masks.
+## River has no equivalent of caps lock/mod2 (num lock); those are ignored
+## (mapped to no modifier) since River matches bindings regardless of locks.
 const ModifierTable* = {
-  "control": ControlMask,
-  "shift": ShiftMask,
-  "alt": Mod1Mask,
-  "super": Mod4Mask,
-  "caps lock": LockMask,
-  "mod1": Mod1Mask,
-  "mod2": Mod2Mask,
-  "mod3": Mod3Mask,
-  "mod4": Mod4Mask,
-  "mod5": Mod5Mask,
+  "control": RIVER_SEAT_V1_MODIFIERS_CTRL,
+  "shift": RIVER_SEAT_V1_MODIFIERS_SHIFT,
+  "alt": RIVER_SEAT_V1_MODIFIERS_MOD1,
+  "super": RIVER_SEAT_V1_MODIFIERS_MOD4,
+  "caps lock": RIVER_SEAT_V1_MODIFIERS_NONE,
+  "mod1": RIVER_SEAT_V1_MODIFIERS_MOD1,
+  "mod2": RIVER_SEAT_V1_MODIFIERS_NONE,
+  "mod3": RIVER_SEAT_V1_MODIFIERS_MOD3,
+  "mod4": RIVER_SEAT_V1_MODIFIERS_MOD4,
+  "mod5": RIVER_SEAT_V1_MODIFIERS_MOD5,
 }.toTable()
 
-var numlockmask*: cuint = 0
-
-proc cleanMask*(mask: int): int =
-  ## Creates a uniform mask that can be used with
-  ## masks defined in x11/x.nim and TXKeyEvent.state
-  mask and (not (numlockmask.int or LockMask)) and
-  (ShiftMask or ControlMask or Mod1Mask or Mod2Mask or Mod3Mask or Mod4Mask or Mod5Mask)
-
-func toKeycode*(key: string, display: PDisplay): int =
-  XKeysymToKeycode(display, XStringToKeysym(key))
-
-func toString*(key: KeyCode, display: PDisplay): string =
-  let keySym = XKeycodeToKeysym(display, key, cint(0))
-  return $XKeysymToString(keySym)
-
-proc updateNumlockMask*(display: PDisplay) =
-  numlockmask = 0
-  let pModmap = XGetModifierMapping(display)
-  let pModifierMap = cast[ptr UncheckedArray[cuchar]](pModmap[].modifiermap)
-  let maxKeyPerMod = pModmap[].max_keypermod
-  for i in 0..<8:
-    for j in 0..maxKeyPerMod:
-      let modifier = pModifierMap[][i * maxKeyPerMod + j]
-      if modifier == XKeysymToKeycode(display, XK_Num_Lock):
-        numlockmask = 1.cuint shl i
-  discard XFreeModifiermap(pModmap)
-
+proc toKeysym*(key: string): Keysym =
+  ## Converts a key name (e.g. "Return", "i", "comma", "1") to an xkbcommon keysym.
+  ## Returns NoSymbol if the name is unknown.
+  ##
+  ## River matches a binding against the keysym of the physical key at its base
+  ## level (shift is NOT applied; Super+Shift+1 matches the keysym `1`, not
+  ## `exclam`) and requires the modifiers to match exactly. So letters must be
+  ## lowercase: a config key "R" (keysym `R`, shift level) could never match.
+  if key.len == 1 and key[0] in {'A'..'Z'}:
+    return xkb_keysym_from_name(key.toLowerAscii.cstring, 0)
+  xkb_keysym_from_name(key.cstring, 0)

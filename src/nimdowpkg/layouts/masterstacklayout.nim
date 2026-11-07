@@ -1,13 +1,9 @@
 import
-  x11/xlib,
   math,
   layout,
   ../client,
   ../area,
   ../logger
-
-converter intToCint(x: int): cint = x.cint
-converter intToCUint(x: int): cuint = x.cuint
 
 const layoutName: string = "masterstack"
 
@@ -18,7 +14,6 @@ type MasterStackLayout* = ref object of Layout
 
 proc layoutSingleClient(
   this: MasterStackLayout,
-  display: PDisplay,
   client: Client,
   screenWidth: uint,
   screenHeight: uint,
@@ -26,7 +21,6 @@ proc layoutSingleClient(
 )
 proc layoutMultipleClients(
   this: MasterStackLayout,
-  display: PDisplay,
   clients: seq[Client],
   screenWidth: uint,
   screenHeight: uint,
@@ -72,8 +66,7 @@ proc newMasterStackLayout*(
 
 method arrange*(
     this: MasterStackLayout,
-    display: PDisplay,
-    clients: seq[Client],
+      clients: seq[Client],
     offset: LayoutOffset
   ) =
   ## Aligns the clients in a master/stack fashion.
@@ -87,13 +80,12 @@ method arrange*(
   let clientsToBeArranged = getClientsToBeArranged(clients)
   let clientCount = clientsToBeArranged.len
   if clientCount == 1:
-    this.layoutSingleClient(display, clientsToBeArranged[0], screenWidth.uint, screenHeight.uint, offset)
+    this.layoutSingleClient(clientsToBeArranged[0], screenWidth.uint, screenHeight.uint, offset)
   else:
-    this.layoutMultipleClients(display, clientsToBeArranged, screenWidth.uint, screenHeight.uint, offset)
+    this.layoutMultipleClients(clientsToBeArranged, screenWidth.uint, screenHeight.uint, offset)
 
 proc layoutSingleClient(
   this: MasterStackLayout,
-  display: PDisplay,
   client: Client,
   screenWidth: uint,
   screenHeight: uint,
@@ -105,7 +97,6 @@ proc layoutSingleClient(
     client.borderWidth = 0
 
   client.resize(
-    display,
     this.monitorArea.x + offset.left.int + int(this.outerGap),
     this.monitorArea.y + offset.top.int + int(this.outerGap),
     max(uint 1, screenWidth - this.outerGap * 2 - client.borderWidth * 2),
@@ -114,7 +105,6 @@ proc layoutSingleClient(
 
 proc layoutMultipleClients(
   this: MasterStackLayout,
-  display: PDisplay,
   clients: seq[Client],
   screenWidth: uint,
   screenHeight: uint,
@@ -177,8 +167,7 @@ proc layoutMultipleClients(
     client.oldBorderWidth = client.borderWidth
     client.borderWidth = this.borderWidth
     client.resize(
-      display,
-      this.monitorArea.x + (xPos + offset.left).int,
+        this.monitorArea.x + (xPos + offset.left).int,
       this.monitorArea.y + (yPos + offset.top).int,
       clientWidth,
       clientHeight
