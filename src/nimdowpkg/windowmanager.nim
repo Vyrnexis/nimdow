@@ -562,6 +562,15 @@ proc reloadConfig*(this: WindowManager) =
   for monitor in this.monitors.mvalues():
     monitor.setConfig(this.config)
 
+  # trayEnabled may have changed: start or stop the tray.
+  if this.config.trayEnabled:
+    if this.tray != nil and not this.tray.alive:
+      this.tray = nil
+    this.startTray()
+  elif this.tray != nil:
+    this.tray.stop()
+    this.tray = nil
+
   # Bindings are re-created from the new key combos in the next manage sequence.
   this.bindingsDirty = true
 
@@ -1252,6 +1261,8 @@ proc handleBarClicks(this: WindowManager) =
       bar = click.bar
       trayIcon = bar.trayIconAt(click.x, click.y)
     if trayIcon.uid >= 0 and this.tray != nil:
+      if this.menu != nil:
+        this.menu.tooltipClicked(trayIcon.uid)
       this.tray.click(trayIcon.uid, click.button, trayIcon.x, trayIcon.y)
       continue
     # Any other click on the bar dismisses the tray menu.
@@ -1312,6 +1323,7 @@ proc manageMenu(this: WindowManager) =
   ## tray's menu session. Manage sequence only.
   if this.menu == nil:
     return
+  this.menu.beginManage()
   var
     bar: StatusBar
     area: tuple[x, y, w, h: int]
@@ -1330,6 +1342,29 @@ proc manageMenu(this: WindowManager) =
         let usable = monitor.usableArea()
         area = (usable.x.int, usable.y.int, usable.width.int, usable.height.int)
   this.menu.manage(this.tray, bar, area)
+
+  # The tooltip of the tray icon under the pointer.
+  var
+    hoverBar: StatusBar
+    hoverArea: tuple[x, y, w, h: int]
+  let hovered = this.menu.hoverBar()
+  if hovered != nil:
+    for monitor in this.monitors.values():
+      if monitor.statusBar == hovered and monitor.isStatusBarEnabled:
+        hoverBar = hovered
+        let usable = monitor.usableArea()
+        hoverArea = (usable.x.int, usable.y.int, usable.width.int, usable.height.int)
+        break
+  this.menu.manageTooltip(this.tray, hoverBar, hoverArea)
+
+proc timerTimeoutMs*(this: WindowManager): int =
+  ## Event loop timeout for the menu/tooltip timers (-1: none).
+  if this.menu == nil: -1 else: this.menu.timeoutMs()
+
+proc fireTimers*(this: WindowManager) =
+  ## Starts a manage sequence when a menu/tooltip timer is due.
+  if this.menu != nil and this.menu.checkTimers():
+    this.markDirty()
 
 proc startSeatOp(
   this: WindowManager, seat: Seat, client: Client, kind: PointerRequestKind, edges: uint32

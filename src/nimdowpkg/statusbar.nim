@@ -157,6 +157,9 @@ type
     ## Called with every wl_keyboard created for a seat (the menu popup adds
     ## its listener there).
     onKeyboard*: proc(keyboard: WlKeyboard) {.closure.}
+    ## The pointer moved over a bar (surface coordinates) / left it.
+    barHover*: proc(bar: StatusBar, x, y: int) {.closure.}
+    barLeave*: proc() {.closure.}
     # Pointer cursor
     cursorSurface: WlSurface
     cursorTheme: WlCursorTheme
@@ -238,10 +241,14 @@ proc pointerEnter(data: pointer, obj: WlPointer, serial: uint32, surface: WlSurf
     if bar != nil:
       p.focus = cast[StatusBar](bar)
       p.setCursor(serial, max(1, (p.focus.scale120 + 119) div 120))
+      if p.ctx.barHover != nil:
+        p.ctx.barHover(p.focus, p.x, p.y)
 
 proc pointerLeave(data: pointer, obj: WlPointer, serial: uint32,
     surface: WlSurface) {.cdecl.} =
   let p = cast[BarPointer](data)
+  if p.focus != nil and p.ctx.barLeave != nil:
+    p.ctx.barLeave()
   p.focus = nil
   let target = p.target
   p.target = nil
@@ -254,6 +261,8 @@ proc pointerMotion(data: pointer, obj: WlPointer, time: uint32, x, y: WlFixed) {
   p.y = wlFixedToFloat(y).int
   if p.target != nil and p.target.motion != nil:
     p.target.motion(p.x, p.y)
+  elif p.focus != nil and p.ctx.barHover != nil:
+    p.ctx.barHover(p.focus, p.x, p.y)
 
 proc queueClick(p: BarPointer, button: int) =
   if p.target != nil:

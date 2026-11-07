@@ -135,7 +135,7 @@ if [ "$MODE" = outer ]; then
     fullscreen close tagOps order reload typing dragMove dragResize barClick barScroll \
     clickFocus appRules scratchpad statusBar trayIcons trayClick trayUpdate trayVanish \
     menuOpen menuActivate menuToggle menuDisabled menuSubmenu menuKeyboard menuDismiss menuReopen \
-    itemIsMenu trayNoMenu focusRestore exitSession
+    trayTooltip menuHoverIntent menuKeyRepeat itemIsMenu trayNoMenu focusRestore exitSession
   rm -rf "$RT"
 
   echo
@@ -873,6 +873,83 @@ scenario_menuReopen() {
   tray_kill
 }
 
+scenario_trayTooltip() {
+  begin trayTooltip
+  tray_up
+  local nx y=$((BAR / 2))
+  nx="$(tray_x fake-name)"
+  "$INPUT" move "$nx" "$y"
+  sleep 0.1
+  expect "no tooltip right after entering the icon" '(.menu.tooltip.visible | not)'
+  sleep 0.8
+  expect "tooltip with the ToolTip title after the delay" '.menu.tooltip.visible and .menu.tooltip.text == "fake-name tip"'
+  expect "tooltip below the bar, inside the output" \
+    "M.barHeight as \$bh | .menu.tooltip | .y == \$bh and .x >= 0 and .x + .width <= $WIDTH and .width > 20"
+  shot trayTooltip
+  "$INPUT" move $((WIDTH / 3)) "$y"
+  expect "hidden when the pointer leaves the icon" '(.menu.tooltip.visible | not)'
+  "$INPUT" move "$nx" "$y"
+  sleep 0.9
+  expect "shown again" '.menu.tooltip.visible'
+  "$INPUT" click left
+  expect "hidden by a click" '(.menu.tooltip.visible | not)'
+  sleep 0.9
+  expect "not shown again until the pointer re-enters" '(.menu.tooltip.visible | not)'
+  "$INPUT" move "$nx" "$y"
+  sleep 0.9
+  "$INPUT" click right
+  expect "menu open hides it" '.menu.open and (.menu.tooltip.visible | not)'
+  key Escape
+  expect "closed" '(.menu.open | not)'
+  tray_kill
+}
+
+scenario_menuHoverIntent() {
+  begin menuHoverIntent
+  tray_up
+  menu_open fake-name
+  local mx my ox oy
+  read -r mx my <<<"$(menu_row 0 3)"
+  read -r ox oy <<<"$(menu_row 0 1)"
+  "$INPUT" move "$mx" "$my"
+  sleep 0.05
+  "$INPUT" move "$ox" "$oy"
+  sleep 0.6
+  expect "a short hover over More opens nothing" '(.menu.submenuOpen | not)'
+  "$INPUT" move "$mx" "$my"
+  expect "staying on More opens the submenu" '.menu.submenuOpen and .menu.popups[1].mapped'
+  # Diagonal move: across another row of the parent into the submenu.
+  local sx sy
+  read -r sx sy <<<"$(menu_row 1 4)"
+  "$INPUT" move "$ox" "$oy"
+  "$INPUT" move "$sx" "$sy"
+  sleep 0.6
+  expect "the submenu stays open when the pointer reaches it" '.menu.submenuOpen'
+  shot menuHoverIntent
+  # Resting on another entry of the parent closes it after the grace.
+  "$INPUT" move "$ox" "$oy"
+  expect "closed after resting on another entry" '(.menu.submenuOpen | not)'
+  key Escape
+  expect "closed" '(.menu.open | not)'
+  tray_kill
+}
+
+scenario_menuKeyRepeat() {
+  begin menuKeyRepeat
+  tray_up
+  menu_open fake-name
+  "$INPUT" hold Down 1500
+  expect "holding Down repeats the key" '.menu.keyRepeats >= 3'
+  expect "a row is selected" '.menu.popups[0].selected >= 0'
+  local n
+  n="$(q '.menu.keyRepeats')"
+  sleep 0.5
+  [ "$(q '.menu.keyRepeats')" = "$n" ] || { FAILED=1; DETAIL="$DETAIL [repeat continued after the key release]"; }
+  key Escape
+  expect "closed" '(.menu.open | not)'
+  tray_kill
+}
+
 scenario_itemIsMenu() {
   begin itemIsMenu
   tray_kill
@@ -1066,7 +1143,7 @@ else
            tagOps order reload typing dragMove dragResize barClick barScroll clickFocus \
            appRules scratchpad statusBar trayIcons trayClick trayUpdate trayVanish \
            menuOpen menuActivate menuToggle menuDisabled menuSubmenu menuKeyboard menuDismiss \
-           menuReopen itemIsMenu trayNoMenu focusRestore; do
+           menuReopen trayTooltip menuHoverIntent menuKeyRepeat itemIsMenu trayNoMenu focusRestore; do
     run "scenario_$s"
   done
   reset

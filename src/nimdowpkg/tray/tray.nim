@@ -57,7 +57,7 @@ type
     ## The SNI ifaceName name that answered.
     iface*: string
     loaded*: bool
-    id*, title*, tooltipTitle*: string
+    id*, title*, tooltipTitle*, tooltipText*: string
     status*: ItemStatus
     iconName, attentionIconName, themePath: string
     pixmaps, attentionPixmaps: seq[IconPixmap]
@@ -125,10 +125,53 @@ var gTray: Tray
 # Helpers
 # ---------------------------------------------------------------------------
 
-proc nowMs(): int64 =
+proc nowMs*(): int64 =
   var ts: Timespec
   discard clock_gettime(CLOCK_MONOTONIC, ts)
   ts.tv_sec.int64 * 1000 + ts.tv_nsec.int64 div 1_000_000
+
+proc plainText*(markup: string): string =
+  ## Simple markup (tags, a few entities) removed; `<br>` and `</p>` become
+  ## line breaks.
+  var
+    inTag = false
+    tag = ""
+    text = ""
+  for c in markup:
+    if inTag:
+      if c == '>':
+        inTag = false
+        let name = tag.toLowerAscii().strip(chars = {'/', ' '})
+        if name.startsWith("br") or name == "p":
+          text.add '\n'
+      else:
+        tag.add c
+    elif c == '<':
+      inTag = true
+      tag = ""
+    else:
+      text.add c
+  result = text.multiReplace(("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"),
+    ("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&amp;", "&"))
+
+proc tooltipLines*(item: TrayItem): seq[string] =
+  ## What the tooltip shows: the ToolTip title (and the first line of its
+  ## description), else the Title, else the Id.
+  proc firstLine(s: string): string =
+    for line in plainText(s).splitLines():
+      if line.strip().len > 0:
+        return line.strip()
+  let title = firstLine(item.tooltipTitle)
+  if title.len > 0:
+    result.add title
+    let desc = firstLine(item.tooltipText)
+    if desc.len > 0:
+      result.add desc
+    return
+  for candidate in [item.title, item.id]:
+    let line = firstLine(candidate)
+    if line.len > 0:
+      return @[line]
 
 proc toStr(s: cstring): string =
   if s == nil: "" else: $s
@@ -173,7 +216,7 @@ proc newRequest(t: Tray, req: Request): pointer =
   t.requests[t.nextRequest] = req
   cast[pointer](t.nextRequest)
 
-proc findItem(t: Tray, uid: int): TrayItem =
+proc findItem*(t: Tray, uid: int): TrayItem =
   for item in t.items:
     if item.uid == uid:
       return item
@@ -353,6 +396,7 @@ proc parseItemProps(m: SdBusMessage, item: TrayItem): bool =
   item.id = ""
   item.title = ""
   item.tooltipTitle = ""
+  item.tooltipText = ""
   item.status = isActive
   item.iconName = ""
   item.attentionIconName = ""
@@ -411,7 +455,7 @@ proc parseItemProps(m: SdBusMessage, item: TrayItem): bool =
         discard readString(m, 's')
         discard sd_bus_message_skip(m, "a(iiay)")
         item.tooltipTitle = readString(m, 's')
-        discard readString(m, 's')
+        item.tooltipText = readString(m, 's')
         discard sd_bus_message_exit_container(m)
       else: handled = false
     else: handled = false
@@ -669,6 +713,10 @@ proc shutdown(t: Tray) =
     item.freeCache()
   t.items.setLen 0
   t.changed()
+
+proc stop*(t: Tray) =
+  ## Closes the bus connection (the tray names go away with it).
+  t.shutdown()
 
 proc process*(t: Tray) =
   ## Runs due refetches and processes everything sd-bus has pending. Never

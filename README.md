@@ -69,7 +69,13 @@ If no config file is found, Nimdow will not launch.
 This branch is a [River](https://codeberg.org/river/river) (0.5 or newer) window manager client
 using `river-window-management-v1`. X11 is no longer supported.
 
-- Build dependencies: `wayland`, `xkbcommon`, `cairo`, `pango`, `river >= 0.5` (plus `nim` and `nimble`).
+- Build dependencies: `wayland`, `xkbcommon`, `cairo`, `pango`, `librsvg`, `libsystemd`, `river >= 0.5` (plus
+  `nim` and the `parsetoml` nimble package).
+- Installing on Arch Linux: `cd packaging/arch && makepkg -si` builds and installs `nimdow-wayland-git` (it
+  fetches the `wayland` branch and a pinned parsetoml, no nimble needed). Elsewhere: `nimble install -d`,
+  `nimble release`, then copy `bin/nimdow` to `/usr/bin`, `config.default.toml` to
+  `/usr/share/nimdow/` (or `~/.config/nimdow/config.toml`) and `wayland-sessions/nimdow.desktop` to
+  `/usr/share/wayland-sessions/`.
 - Run with `river -c nimdow`. For a login manager, install `wayland-sessions/nimdow.desktop`
   to `/usr/share/wayland-sessions/`.
 - The status text is set with `nimdow --status "text"`, for example:
@@ -129,20 +135,28 @@ SVG icons need librsvg.
   hicolor and `/usr/share/pixmaps` (SVG preferred, `a-b-c` falls back to `a-b`); otherwise the `IconPixmap` is
   used; otherwise a placeholder letter is drawn. The theme is `trayIconTheme`, else `gtk-icon-theme-name` of the
   GTK 3/4 `settings.ini`, else Adwaita (gsettings/dconf is not queried).
-- Settings (in `[settings]`): `trayEnabled` (default `true`, read at startup), `trayMonitor` (default `1`, the
+- Settings (in `[settings]`): `trayEnabled` (default `true`; a config reload starts or stops the tray), `trayMonitor` (default `1`, the
   first monitor; `0` follows the selected monitor), `trayIconPadding` (default `2`), `trayIconSpacing`
   (default `4`), `trayIconTheme`.
 - Context menus: right click opens the item's `com.canonical.dbusmenu` (its `Menu` object path) as a popup under
   the icon, drawn with the bar's font and colors; left click does so for items with `ItemIsMenu`. Items without
   a `Menu` get `ContextMenu(x, y)` instead. Entries: labels (mnemonics stripped), separators, check/radio marks,
-  icons (`icon-name`), disabled entries, submenus (opened on hover or click, to the right of their parent or to
-  the left at the screen edge). The menu closes after an activation, with Escape, when clicking elsewhere on the
+  icons (`icon-name`), disabled entries, submenus (opened on click, or after hovering the entry for 200ms; an
+  open submenu is kept for 300ms while the pointer crosses other entries on its way to it; shown to the right of
+  their parent or to the left at the screen edge). The menu closes after an activation, with Escape, when clicking elsewhere on the
   bar, on a window or on the icon again, on a tag change, or when the item disappears. Keyboard: Up/Down (skip
-  separators and disabled entries), Right/Enter/Space (open submenu/activate), Left (close submenu), Escape. The
+  separators and disabled entries; holding the key repeats at the seat's `wl_keyboard.repeat_info` rate/delay), Right/Enter/Space (open submenu/activate), Left (close submenu), Escape. The
   menu takes the keyboard focus (the previous window gets it back when it closes). The menu follows
   `LayoutUpdated`/`ItemsPropertiesUpdated`. Settings: `menuBorderColor` (default: `barSelectionColor`),
   `menuWidthMin` (default `150`).
-- Not implemented yet: tooltips, scrolling of menus taller than the screen.
+- Tooltips: hovering an icon for 600ms shows a small popup below it with the item's `ToolTip` title (and the first
+  line of its description; simple HTML markup is stripped), else its `Title`, else its `Id`. It is drawn with the
+  bar's colors and font and `menuBorderColor`, and hides when the pointer leaves, on a click and while a menu is
+  open.
+- Limitation: River sends no event for clicks that hit neither a window nor one of our surfaces (the bare
+  desktop), so an open menu is not dismissed by a click on empty desktop; use Escape, a window, the bar or a tag
+  change.
+- Not implemented yet: scrolling of menus taller than the screen.
 
 ### Setting the status <a name="setting-status"></a>
 

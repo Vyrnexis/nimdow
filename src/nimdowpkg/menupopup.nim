@@ -49,6 +49,13 @@ const
   keyDown = 0xff54'u32
   keyLeft = 0xff51'u32
   keyRight = 0xff53'u32
+  # Timers (milliseconds).
+  hoverOpenMs = 200
+  hoverSwitchMs = 300
+  tooltipMs = 600
+  defaultRepeatRate = 25
+  defaultRepeatDelay = 600
+  tipPadH = 6
 
 type
   Row = object
@@ -90,6 +97,8 @@ type
     mapped: bool
     drawnKey: string
     icons: Table[string, CairoSurface]
+    ## Not empty: this is a tooltip showing these lines (no rows, no input).
+    tip: seq[string]
 
   MenuInputKind = enum
     miHover, miClick, miKey
@@ -111,6 +120,25 @@ type
     ## The clicked icon (position on the screen) and the bottom of the bar.
     anchorX, anchorY, anchorBottom: int
     inputs: seq[MenuInput]
+    ## Hover intent: the submenu of entry `pendEntry` of `pendPopup` is opened
+    ## (or the open one closed) at `pendDue` unless the pointer moved on.
+    pendPopup: MenuPopup
+    pendEntry: int
+    pendDue: int64
+    ## Key repeat (wl_keyboard.repeat_info) of the held Up/Down key.
+    repeatRate, repeatDelay: int
+    heldKey, heldSym: uint32
+    nextRepeat: int64
+    repeatCount: int
+    ## Tooltip: the tray icon under the pointer (-1: none) and when its
+    ## tooltip is due (0: not pending).
+    tip: MenuPopup
+    tipUid: int
+    hoverBar: StatusBar
+    hoverUid, suppressUid: int
+    hoverDue: int64
+    ## `checkTimers` told the event loop about the due timers.
+    timerNotified: bool
     pendingFlush: bool
     keyboardFocused: bool
     keyboardSurface: WlSurface
@@ -171,6 +199,16 @@ proc computeLayout(popup: MenuPopup) =
   let
     textH = textSize(cr, "Ag", desc).h
     rowH = max(m.bar.height, textH + 6)
+  if popup.tip.len > 0:
+    var maxW = 0
+    for line in popup.tip:
+      maxW = max(maxW, textSize(cr, oneLine(line), desc).w)
+    popup.width = maxW + 2 * (border + tipPadH)
+    popup.height = textH * popup.tip.len + 2 * (border + padV)
+    cairo_destroy(cr)
+    cairo_surface_destroy(surface)
+    inc popup.contentGen
+    return
   var
     y = border + padV
     maxText = 0
@@ -346,6 +384,17 @@ proc draw(popup: MenuPopup, data: pointer) =
     (popup.height - 2 * border).cdouble)
   cairo_fill(cr)
   cairo_set_operator(cr, CAIRO_OPERATOR_OVER)
+  if popup.tip.len > 0:
+    let
+      fg = toRgba(settings.fgColor)
+      desc = popup.mgr.bar.fontDescription
+      lineH = (popup.height - 2 * (border + padV)) div popup.tip.len
+    cairo_set_source_rgba(cr, fg.r, fg.g, fg.b, 1.0)
+    for i, line in popup.tip:
+      let layout = newLayout(cr, oneLine(line), desc)
+      cairo_move_to(cr, (border + tipPadH).cdouble, (border + padV + i * lineH).cdouble)
+      pango_cairo_show_layout(cr, layout)
+      g_object_unref(layout)
   for i in 0 ..< popup.rows.len:
     popup.drawRow(cr, i)
   cairo_destroy(cr)
@@ -455,10 +504,11 @@ proc onMotion(popup: MenuPopup, x, y: int) =
     m.inputs.add MenuInput(kind: miHover, popup: popup, row: row)
     m.requestManage()
 
-proc newPopup(m: MenuManager, level, parentId: int, entries: seq[MenuEntry]): MenuPopup =
+proc newPopup(m: MenuManager, level, parentId: int, entries: seq[MenuEntry],
+    tip: seq[string] = @[]): MenuPopup =
   let ctx = m.ctx
   result = MenuPopup(
-    mgr: m, level: level, parentId: parentId, entries: entries, selected: -1,
+    mgr: m, level: level, parentId: parentId, entries: entries, selected: -1, tip: tip,
     scale120: max(120, m.bar.scale120), icons: initTable[string, CairoSurface]()
   )
   GC_ref result
@@ -473,6 +523,13 @@ proc newPopup(m: MenuManager, level, parentId: int, entries: seq[MenuEntry]): Me
   result.shell = river_window_manager_v1_get_shell_surface(ctx.manager, result.surface)
   result.node = river_shell_surface_v1_get_node(result.shell)
   let popup = result
+  if tip.len > 0:
+    # A tooltip never takes the pointer: an empty input region.
+    let region = wl_compositor_create_region(ctx.compositor)
+    wl_surface_set_input_region(result.surface, region)
+    wl_region_destroy(region)
+    result.computeLayout()
+    return
   result.target = InputTarget(
     surface: result.surface, scale120: result.scale120,
     enter: proc(x, y: int) = popup.onMotion(x, y),
@@ -486,6 +543,8 @@ proc newPopup(m: MenuManager, level, parentId: int, entries: seq[MenuEntry]): Me
     leave: proc() =
       # The highlight stays on the entry that has its submenu open.
       let m = popup.mgr
+      m.inputs.add MenuInput(kind: miHover, popup: popup, row: -1)
+      m.requestManage()
       let idx = m.popups.find(popup)
       if idx >= 0 and idx == m.popups.high:
         popup.selected = -1
@@ -495,7 +554,10 @@ proc newPopup(m: MenuManager, level, parentId: int, entries: seq[MenuEntry]): Me
   result.computeLayout()
 
 proc destroyPopup(m: MenuManager, popup: MenuPopup) =
-  m.ctx.removeTarget(popup.target)
+  if popup.target != nil:
+    m.ctx.removeTarget(popup.target)
+  if m.pendPopup == popup:
+    m.pendPopup = nil
   popup.freeBuffers()
   for surface in popup.icons.values:
     if surface != nil:
@@ -562,6 +624,57 @@ proc moveSelection(popup: MenuPopup, step: int) =
       popup.selected = i
       return
 
+proc clearPending(m: MenuManager) =
+  m.pendPopup = nil
+
+proc schedule(m: MenuManager, popup: MenuPopup, entryId, delayMs: int) =
+  if m.pendPopup == popup and m.pendEntry == entryId:
+    return
+  m.pendPopup = popup
+  m.pendEntry = entryId
+  m.pendDue = nowMs() + delayMs
+
+proc runPending(m: MenuManager, tray: Tray) =
+  ## Hover intent: the pointer stayed on the entry long enough.
+  if m.pendPopup == nil or nowMs() < m.pendDue:
+    return
+  let
+    popup = m.pendPopup
+    id = m.pendEntry
+    index = m.popups.find(popup)
+  m.clearPending()
+  if index < 0:
+    return
+  for r, row in popup.rows:
+    if row.entry.id != id:
+      continue
+    if row.entry.selectable and row.entry.submenu:
+      m.openSubmenu(tray, popup, r, false)
+    elif m.popups.len > index + 1:
+      m.closeFrom(tray, index + 1)
+    return
+
+proc repeatKeys(m: MenuManager) =
+  ## Queues the key events the held Up/Down key repeats since the last call.
+  if m.heldSym == 0 or m.nextRepeat <= 0:
+    return
+  let
+    now = nowMs()
+    interval = int64(max(1, 1000 div max(1, m.repeatRate)))
+  var steps = 0
+  while now >= m.nextRepeat and steps < 8:
+    m.inputs.add MenuInput(kind: miKey, sym: m.heldSym)
+    inc m.repeatCount
+    inc steps
+    m.nextRepeat += interval
+  if now >= m.nextRepeat:
+    m.nextRepeat = now + interval
+
+proc stopRepeat(m: MenuManager) =
+  m.heldSym = 0
+  m.heldKey = 0
+  m.nextRepeat = 0
+
 proc handleInputs(m: MenuManager, tray: Tray) =
   let inputs = m.inputs
   m.inputs.setLen 0
@@ -572,15 +685,34 @@ proc handleInputs(m: MenuManager, tray: Tray) =
     of miHover:
       let popup = input.popup
       let index = m.popups.find(popup)
-      if index < 0 or input.row < 0 or input.row >= popup.rows.len:
+      if index < 0:
+        continue
+      if input.row < 0 or input.row >= popup.rows.len:
+        # The pointer left the rows: a pending open of this popup is moot.
+        if m.pendPopup == popup:
+          m.clearPending()
         continue
       let entry = popup.rows[input.row].entry
-      if entry.selectable and entry.submenu:
-        m.openSubmenu(tray, popup, input.row, false)
-      elif m.popups.len > index + 1 and entry.selectable:
-        # Another entry of the parent: its submenu goes away.
-        m.closeFrom(tray, index + 1)
+      # The pointer reached another popup: a pending switch is moot.
+      if m.pendPopup != nil and m.pendPopup != popup:
+        m.clearPending()
+      let childOpen = m.popups.len > index + 1
+      if not entry.selectable:
+        if not childOpen:
+          m.clearPending()
+      elif entry.submenu:
+        if childOpen and m.popups[index + 1].parentId == entry.id:
+          m.clearPending()
+        else:
+          m.schedule(popup, entry.id, if childOpen: hoverSwitchMs else: hoverOpenMs)
+      elif childOpen:
+        # Another entry of the parent: its submenu goes away, after a short
+        # grace for a pointer moving diagonally toward it.
+        m.schedule(popup, entry.id, hoverSwitchMs)
+      else:
+        m.clearPending()
     of miClick:
+      m.clearPending()
       let popup = input.popup
       if m.popups.find(popup) < 0 or input.row >= popup.rows.len:
         continue
@@ -648,6 +780,7 @@ proc keyboardLeave(data: pointer, obj: WlKeyboard, serial: uint32,
   let m = cast[MenuManager](data)
   if surface.isNil or surface == m.keyboardSurface:
     m.keyboardFocused = false
+    m.stopRepeat()
 
 proc evdevSym(key: uint32): uint32 =
   ## Without a keymap: the navigation keys by their evdev codes.
@@ -664,13 +797,30 @@ proc evdevSym(key: uint32): uint32 =
 
 proc keyboardKey(data: pointer, obj: WlKeyboard, serial, time, key, state: uint32) {.cdecl.} =
   let m = cast[MenuManager](data)
-  if state != WL_KEYBOARD_KEY_STATE_PRESSED or not m.keyboardFocused:
+  if state != WL_KEYBOARD_KEY_STATE_PRESSED:
+    if key == m.heldKey:
+      m.stopRepeat()
+    return
+  if not m.keyboardFocused:
     return
   let sym =
     if m.xkbState != nil: xkb_state_key_get_one_sym(m.xkbState, key + 8)
     else: evdevSym(key)
   m.inputs.add MenuInput(kind: miKey, sym: sym)
+  if sym in [keyUp, keyDown] and m.repeatRate > 0:
+    m.heldKey = key
+    m.heldSym = sym
+    m.nextRepeat = nowMs() + m.repeatDelay
+  else:
+    m.stopRepeat()
   m.requestManage()
+
+proc keyboardRepeatInfo(data: pointer, obj: WlKeyboard, rate, delay: int32) {.cdecl.} =
+  let m = cast[MenuManager](data)
+  m.repeatRate = rate.int
+  m.repeatDelay = max(0, delay.int)
+  if rate <= 0:
+    m.stopRepeat()
 
 proc keyboardModifiers(data: pointer, obj: WlKeyboard, serial, depressed, latched, locked,
     group: uint32) {.cdecl.} =
@@ -684,13 +834,32 @@ keyboardListener.enter = keyboardEnter
 keyboardListener.leave = keyboardLeave
 keyboardListener.key = keyboardKey
 keyboardListener.modifiers = keyboardModifiers
+keyboardListener.repeat_info = keyboardRepeatInfo
 
 proc newMenuManager*(ctx: BarContext): MenuManager =
   ## Hooks into the bar context's keyboards (set up before the seats' first
   ## capabilities event).
-  result = MenuManager(ctx: ctx, version: -1)
+  result = MenuManager(ctx: ctx, version: -1, repeatRate: defaultRepeatRate,
+    repeatDelay: defaultRepeatDelay, tipUid: -1, hoverUid: -1, suppressUid: -1)
   GC_ref result
   let m = result
+  ctx.barHover = proc(bar: StatusBar, x, y: int) =
+    let uid = bar.trayIconAt(x, y).uid
+    if uid == m.hoverUid and bar == m.hoverBar:
+      return
+    m.hoverBar = bar
+    m.hoverUid = uid
+    if uid != m.suppressUid:
+      m.suppressUid = -1
+    m.hoverDue = if uid >= 0 and uid != m.suppressUid: nowMs() + tooltipMs else: 0
+    if m.tip != nil:
+      m.requestManage()
+  ctx.barLeave = proc() =
+    m.hoverUid = -1
+    m.suppressUid = -1
+    m.hoverDue = 0
+    if m.tip != nil:
+      m.requestManage()
   ctx.onKeyboard = proc(keyboard: WlKeyboard) =
     discard wl_keyboard_add_listener(keyboard, addr keyboardListener, cast[pointer](m))
 
@@ -733,6 +902,94 @@ proc refreshPopups(m: MenuManager, tray: Tray) =
     popup.place(if i == 0: nil else: m.popups[i - 1])
     inc i
 
+proc beginManage*(m: MenuManager) =
+  ## First call of a manage sequence: the due timers are being handled.
+  m.timerNotified = false
+
+proc hoverBar*(m: MenuManager): StatusBar = m.hoverBar
+
+proc tooltipClicked*(m: MenuManager, uid: int) =
+  ## The icon was clicked: no tooltip until the pointer leaves it.
+  m.suppressUid = uid
+  m.hoverDue = 0
+
+proc hideTooltip(m: MenuManager) =
+  if m.tip != nil:
+    m.destroyPopup(m.tip)
+    m.tip = nil
+  m.tipUid = -1
+
+proc manageTooltip*(m: MenuManager, tray: Tray, bar: StatusBar,
+    area: tuple[x, y, w, h: int]) =
+  ## Shows the tooltip of the hovered tray icon once its delay passed, hides
+  ## it when the pointer left, the icon was clicked or a menu is open. `bar`
+  ## is the bar under the pointer (nil: it is gone). Manage sequence only.
+  var want = -1
+  var item: TrayItem
+  if tray != nil and bar != nil and bar == m.hoverBar and tray.menu == nil and
+      m.hoverUid >= 0 and m.hoverUid != m.suppressUid:
+    item = tray.findItem(m.hoverUid)
+    if item != nil and item.loaded:
+      want = m.hoverUid
+  if tray != nil and tray.menu != nil:
+    m.hoverDue = 0
+  if m.tip != nil and want != m.tipUid:
+    m.hideTooltip()
+  if m.hoverDue <= 0 or nowMs() < m.hoverDue:
+    return
+  # Due: consumed whether or not a tooltip can be shown (no timer spinning).
+  m.hoverDue = 0
+  if want < 0 or m.tip != nil:
+    return
+  let lines = item.tooltipLines()
+  if lines.len == 0:
+    return
+  var region: TrayRegion
+  var found = false
+  for r in bar.trayLayout():
+    if r.uid == want:
+      region = r
+      found = true
+  if not found:
+    return
+  m.bar = bar
+  let tip = m.newPopup(0, 0, @[], lines)
+  var
+    x = region.x + region.width div 2 - tip.width div 2
+    y = bar.origin.y + bar.height
+  if area.w > 0 and area.h > 0:
+    x = max(area.x, min(x, area.x + area.w - tip.width))
+    y = max(area.y, min(y, area.y + area.h - tip.height))
+  tip.x = x
+  tip.y = y
+  m.tip = tip
+  m.tipUid = want
+
+proc timeoutMs*(m: MenuManager): int =
+  ## How long the event loop may sleep for the hover, tooltip and key repeat
+  ## timers (-1: no timer pending, or the loop was told already).
+  result = -1
+  if m == nil or m.timerNotified:
+    return
+  let now = nowMs()
+  template consider(due: int64) =
+    let wait = int(max(0'i64, due - now))
+    if result < 0 or wait < result:
+      result = wait
+  if m.pendPopup != nil:
+    consider m.pendDue
+  if m.hoverDue > 0:
+    consider m.hoverDue
+  if m.heldSym != 0 and m.nextRepeat > 0:
+    consider m.nextRepeat
+
+proc checkTimers*(m: MenuManager): bool =
+  ## True once when a timer is due: the caller starts a manage sequence.
+  if m == nil or m.timerNotified or m.timeoutMs() != 0:
+    return false
+  m.timerNotified = true
+  return true
+
 proc manage*(m: MenuManager, tray: Tray, bar: StatusBar,
     area: tuple[x, y, w, h: int]) =
   ## Handles the queued input and brings the popups in line with the tray's
@@ -743,6 +1000,8 @@ proc manage*(m: MenuManager, tray: Tray, bar: StatusBar,
     tray.closeMenu()
   if tray == nil or tray.menu == nil:
     m.closeFrom(nil, 0)
+    m.clearPending()
+    m.stopRepeat()
     m.inputs.setLen 0
     m.gen = 0
     m.version = -1
@@ -762,7 +1021,9 @@ proc manage*(m: MenuManager, tray: Tray, bar: StatusBar,
   m.anchorBottom = bar.origin.y + bar.height
 
   if m.popups.len > 0:
+    m.repeatKeys()
     m.handleInputs(tray)
+    m.runPending(tray)
     if tray.menu == nil:
       m.closeFrom(nil, 0)
       m.gen = 0
@@ -786,7 +1047,10 @@ proc flush*(m: MenuManager) =
   ## ones that changed. Render sequence only.
   if m == nil:
     return
-  for popup in m.popups:
+  var all = m.popups
+  if m.tip != nil:
+    all.add m.tip
+  for popup in all:
     river_node_v1_set_position(popup.node, popup.x.int32, popup.y.int32)
     river_node_v1_place_top(popup.node)
     let key = $popup.width & "x" & $popup.height & "@" & $popup.scale120 & "#" &
@@ -845,12 +1109,19 @@ proc dumpJson*(m: MenuManager, tray: Tray): JsonNode =
     "itemUid": (if tray != nil and tray.menu != nil: tray.menu.uid else: -1),
     "keyboardFocus": m != nil and m.keyboardFocused,
     "submenuOpen": m != nil and m.popups.len > 1,
+    "keyRepeats": (if m != nil: m.repeatCount else: 0),
+    "tooltip": {"visible": false},
     "entries": newJArray(),
     "submenuEntries": newJArray(),
     "popups": newJArray()
   }
   if m == nil:
     return
+  if m.tip != nil:
+    result["tooltip"] = %*{
+      "visible": m.tip.mapped, "text": m.tip.tip.join("\n"), "x": m.tip.x,
+      "y": m.tip.y, "width": m.tip.width, "height": m.tip.height, "uid": m.tipUid
+    }
   for popup in m.popups:
     var rows = newJArray()
     for row in popup.rows:

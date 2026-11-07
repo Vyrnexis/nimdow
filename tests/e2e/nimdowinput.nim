@@ -3,6 +3,7 @@
 ## tests/e2e/run.sh).
 ##
 ##   nimdowinput key super+shift+1
+##   nimdowinput hold Down 1500      (key down, wait, key up: lets clients repeat)
 ##   nimdowinput type "hello"
 ##   nimdowinput move X Y            (absolute, in output coordinates)
 ##   nimdowinput click left|right|middle
@@ -185,6 +186,14 @@ proc tapKey(spec: string) =
   releaseMods(parts)
   settle(60)
 
+proc holdKey(name: string, ms: int) =
+  ## The key stays down for `ms` (clients implement the key repeat themselves).
+  let key = keyFor(name)
+  sendKey(key.code, true)
+  sleep(ms)
+  sendKey(key.code, false)
+  settle(60)
+
 proc typeText(text: string) =
   ## Types ASCII text (shift is pressed for the shifted level of a key).
   for c in text:
@@ -246,7 +255,7 @@ proc drag(modName, btn: string, x1, y1, x2, y2: int) =
   settle(60)
 
 proc usage() =
-  die "usage: nimdowinput key <combo> | type <text> | move X Y | click <button> | " &
+  die "usage: nimdowinput key <combo> | hold <key> <ms> | type <text> | move X Y | click <button> | " &
     "drag <mod|none> <button> X1 Y1 X2 Y2 | scroll up|down | sleep MS"
 
 when isMainModule:
@@ -278,6 +287,10 @@ when isMainModule:
     if args.len != 2: usage()
     setupKeyboard()
     tapKey(args[1])
+  of "hold":
+    if args.len != 3: usage()
+    setupKeyboard()
+    holdKey(args[1], i(2))
   of "type":
     if args.len != 2: usage()
     setupKeyboard()

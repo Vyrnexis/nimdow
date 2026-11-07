@@ -135,8 +135,16 @@ when isMainModule:
         selector.updateHandle(trayFd, wanted)
       timeout = tray.timeoutMs()
     elif trayFd >= 0:
-      selector.unregister(trayFd)
+      try:
+        selector.unregister(trayFd)
+      except CatchableError:
+        # The connection (and its fd) is already closed.
+        discard
       trayFd = -1
+
+    let menuTimeout = nimdow.timerTimeoutMs()
+    if menuTimeout >= 0 and (timeout < 0 or menuTimeout < timeout):
+      timeout = menuTimeout
 
     var displayReadable, ipcReadable = false
     for event in selector.select(timeout):
@@ -169,5 +177,7 @@ when isMainModule:
     if tray != nil and tray.alive:
       tray.process()
       discard busReadable
+
+    nimdow.fireTimers()
 
     if display.dispatchPending() < 0: fatal "failed to dispatch Wayland events"
