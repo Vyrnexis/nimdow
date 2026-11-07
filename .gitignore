@@ -6,3 +6,7 @@ testresults
 nimcache
 .direnv
 e2e-out
+
+# makepkg build artifacts
+packaging/arch/*
+!packaging/arch/PKGBUILD
