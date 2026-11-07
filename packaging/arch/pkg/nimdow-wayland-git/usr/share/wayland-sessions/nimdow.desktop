@@ -1,6 +1,0 @@
-[Desktop Entry]
-Name=nimdow
-Comment=nimdow window manager (River)
-Exec=river -c nimdow
-Type=Application
-DesktopNames=nimdow
