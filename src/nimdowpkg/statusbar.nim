@@ -448,7 +448,10 @@ proc configureFonts(this: StatusBar) =
       size = parts.size
   if families.len == 0:
     families.add "monospace"
-  let combined = families.join(",") & "," & style & " " & (if size.len == 0: "10" else: size)
+  # Only the first family: listing an emoji font (e.g. Noto Color Emoji, the
+  # default config's second font) makes Pango draw ASCII digits with its
+  # keycap glyphs. Fontconfig's own fallback still finds emoji/icon glyphs.
+  let combined = families[0] & "," & style & " " & (if size.len == 0: "10" else: size)
   this.allFonts = pango_font_description_from_string(combined.cstring)
   if this.fonts.len == 0:
     this.fonts.add pango_font_description_from_string("monospace 10")
